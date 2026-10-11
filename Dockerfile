@@ -15,6 +15,10 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --create-home --uid 1000 arouter
 COPY --from=build /build/target/release/arouter /usr/local/bin/arouter
+# state dir (usage.jsonl, tokens.toml, web.toml): named volumes copy the
+# image dir's ownership at first use — without this the volume mounts
+# root-owned and the unprivileged runtime cannot persist anything
+RUN mkdir -p /var/lib/arouter && chown 1000:1000 /var/lib/arouter
 USER arouter
 WORKDIR /home/arouter
 EXPOSE 3929
