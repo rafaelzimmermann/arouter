@@ -286,17 +286,23 @@ pub fn merge_discovered(
             continue;
         }
         // review F3: unknown price must never silently become "free" in
-        // the paid pool — strip ondemand from unpriced discoveries
-        // (quota/local pools don't charge, so they stay admissible)
+        // the paid pool — strip ondemand from unpriced AND free (price 0)
+        // discoveries. Free models are not "cheap" (the heuristic never
+        // favors them) and must not enter the paid pool either.
+        // quota/local pools don't charge, so they stay admissible.
         let mut pools = if d.pools.is_empty() {
             vec!["quota".to_string()]
         } else {
             d.pools.clone()
         };
-        if d.price.is_none() && pools.iter().any(|p| p == "ondemand") {
+        let free_or_unpriced = match d.price {
+            Some((i, o)) => i <= 0.0 && o <= 0.0,
+            None => true,
+        };
+        if free_or_unpriced && pools.iter().any(|p| p == "ondemand") {
             tracing::warn!(
                 model = d.id,
-                "discovered without price metadata; refusing ondemand admission (set cost_in/cost_out to admit it)"
+                "discovered without payable price metadata; refusing ondemand admission (set cost_in/cost_out to admit it)"
             );
             pools.retain(|p| p != "ondemand");
         }
@@ -528,6 +534,40 @@ mod tests {
             "clamped to worst ladder grade"
         );
         assert!(merged2.validate().is_ok(), "merged config must stay valid");
+    }
+
+    #[test]
+    fn merge_strips_free_discoveries_from_ondemand() {
+        // free (price 0) discoveries are treated like unpriced ones:
+        // ondemand admission is refused, and with no other pool they are
+        // skipped entirely — free models never enter the paid pool
+        let mut cfg = Config::default();
+        cfg.models = vec![ModelConfig {
+            id: "or/seed".into(),
+            grade: "A".into(),
+            pool: vec!["ondemand".into()],
+            base_url: "https://openrouter.ai/api/v1".into(),
+            ..ModelConfig::default()
+        }];
+        let auto = AutoGrades::default();
+        let catalog = Catalog::embedded(&cfg.grades.ladder()).unwrap();
+
+        let mut free_d = disc("or/a-free", false);
+        free_d.pools = vec!["ondemand".into()];
+        free_d.price = Some((0.0, 0.0)); // free: both components zero
+
+        let mut paid_d = disc("or/a-paid", false);
+        paid_d.pools = vec!["ondemand".into()];
+        paid_d.price = Some((1.0, 1.0)); // priced: stays
+
+        let merged = merge_discovered(&cfg, &[free_d, paid_d], &auto, &catalog);
+        assert!(
+            merged.models.iter().all(|m| m.id != "or/a-free"),
+            "free discovery is stripped from ondemand and skipped"
+        );
+        let paid = merged.models.iter().find(|m| m.id == "or/a-paid").unwrap();
+        assert_eq!(paid.pool, vec!["ondemand".to_string()]);
+        assert!(paid.cost_in > 0.0 && paid.cost_out > 0.0);
     }
 
     #[test]

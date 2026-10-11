@@ -310,10 +310,12 @@ impl Registry {
         req: &crate::grades::GradeRequest,
     ) -> Vec<&Model> {
         let ranks = g.ladder.ranks_for(req, None);
-        let preference = g
-            .pool
-            .as_deref()
-            .and_then(|p| self.pool_preference.get(p).map(|s| s.as_str()));
+        // F13 follow-up: pool-form group ordering resolves through
+        // preference_for() — profile override → pool config → the
+        // `ondemand → cheapest` default. The old lookup only saw pool
+        // config and only honored "cheapest", ignoring profile overrides
+        // and the on-demand default.
+        let preference = g.pool.as_deref().map(|p| self.preference_for(profile, p));
         let mut idxs: Vec<usize> = (0..self.models.len())
             .filter(|&i| self.in_group(g, i))
             .filter(|&i| self.visible(&self.models[i], profile))
@@ -821,5 +823,54 @@ mod tests {
             .map(|m| m.id.as_str())
             .collect();
         assert_eq!(got, vec!["strata/qwen3.8"]);
+    }
+
+    #[test]
+    fn group_path_honors_profile_preference_and_ondemand_default() {
+        // pool-form group ordering must resolve through preference_for():
+        // a profile `cheapest` override reorders a weight-ordered quota
+        // group, and the ondemand→cheapest default orders on-demand groups
+        let mut cfg = Config::default();
+        cfg.profiles.insert(
+            "frugal".into(),
+            ProfileConfig {
+                preference: Some("cheapest".into()),
+                ..Default::default()
+            },
+        );
+        cfg.models = vec![
+            m("or/expensive", "A", &["quota"], 9.0, (9.0, 9.0)), // blended 9.0
+            m("or/cheap", "A", &["quota"], 1.0, (0.2, 0.6)),     // blended 0.5
+            m("or/od-expensive", "A", &["ondemand"], 9.0, (9.0, 9.0)),
+            m("or/od-cheap", "A", &["ondemand"], 1.0, (0.2, 0.6)),
+        ];
+        let r = Registry::from_config(&cfg, &ks()).unwrap();
+
+        let quota = r.group("arouter-subscription").unwrap();
+        let quota_req = quota.ladder.parse_request("A").unwrap();
+        // default profile: quota pool is weight-ordered (expensive first)
+        let got: Vec<&str> = r
+            .group_attempt_list("default", quota, &quota_req)
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(got, vec!["or/expensive", "or/cheap"]);
+        // frugal profile overrides to cheapest → cheap first
+        let got: Vec<&str> = r
+            .group_attempt_list("frugal", quota, &quota_req)
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(got, vec!["or/cheap", "or/expensive"]);
+
+        // ondemand group: cheapest-first by default (no override needed)
+        let od = r.group("arouter-ondemand").unwrap();
+        let od_req = od.ladder.parse_request("A").unwrap();
+        let got: Vec<&str> = r
+            .group_attempt_list("default", od, &od_req)
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(got, vec!["or/od-cheap", "or/od-expensive"]);
     }
 }
