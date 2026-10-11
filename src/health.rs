@@ -212,12 +212,11 @@ impl Health {
     pub fn penalty(&self, id: &str) -> f64 {
         let map = self.entries.lock().unwrap();
         match map.get(id) {
-            Some(e) if e.samples.len() >= self.policy.penalty_min_samples => {
-                if self.ratio(e) > self.policy.circuit_ratio {
-                    0.5
-                } else {
-                    1.0
-                }
+            Some(e)
+                if e.samples.len() >= self.policy.penalty_min_samples
+                    && self.ratio(e) > self.policy.circuit_ratio =>
+            {
+                0.5
             }
             _ => 1.0,
         }

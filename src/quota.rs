@@ -129,13 +129,13 @@ pub enum Pace {
 impl Pace {
     fn parse(s: &str) -> Option<Self> {
         let s = s.trim();
-        let (dir, pct) = if let Some(p) = s.strip_prefix("pace behind ") {
-            (Pace::Behind as fn(f64) -> Pace, p)
-        } else if let Some(p) = s.strip_prefix("pace ahead ") {
-            (Pace::Ahead as fn(f64) -> Pace, p)
-        } else {
-            return None;
-        };
+        let (dir, pct) = s
+            .strip_prefix("pace behind ")
+            .map(|p| (Pace::Behind as fn(f64) -> Pace, p))
+            .or_else(|| {
+                s.strip_prefix("pace ahead ")
+                    .map(|p| (Pace::Ahead as fn(f64) -> Pace, p))
+            })?;
         let pct: f64 = pct.trim_end_matches('%').trim().parse().ok()?;
         Some(dir(pct))
     }

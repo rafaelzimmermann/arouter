@@ -889,7 +889,7 @@ async fn try_candidates(
                 Ok(r) => return Ok(r),
                 Err(e) => {
                     if let Some(resp) = e.fatal {
-                        return Ok(resp);
+                        return Ok(*resp);
                     }
                     err.last_error = format!("{}: {}", m.id, e.last_error);
                     err.attempts += 1;
@@ -1221,7 +1221,9 @@ enum Upstream {
 /// the next candidate gets a chance.
 struct CodexFail {
     last_error: String,
-    fatal: Option<Response>,
+    /// Boxed: `Response` is large and clippy's `result_large_err`
+    /// fires on fat Err variants returned from hot paths.
+    fatal: Option<Box<Response>>,
 }
 
 /// One attempt against the Codex subscription backend (E7). Mirrors the
@@ -1258,7 +1260,12 @@ async fn codex_attempt(
         // invalid request is the client's fault: no failover, plain 400
         CodexFail {
             last_error: format!("invalid request: {}", e.message),
-            fatal: Some(wire_error(wire, e.status, "invalid_request", e.message)),
+            fatal: Some(Box::new(wire_error(
+                wire,
+                e.status,
+                "invalid_request",
+                e.message,
+            ))),
         }
     })?;
     let url = crate::codex::responses_url(&m.base_url);

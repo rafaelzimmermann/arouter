@@ -426,18 +426,17 @@ pub fn parse_duration_secs(s: &str) -> Option<u64> {
     for c in s.chars() {
         if c.is_ascii_digit() {
             num.push(c);
-        } else if let Some(unit) = match c {
-            'h' => Some(3600),
-            'm' => Some(60),
-            's' => Some(1),
-            _ => None,
-        } {
+        } else {
+            let unit = match c {
+                'h' => 3600,
+                'm' => 60,
+                's' => 1,
+                _ => return None,
+            };
             let n: u64 = num.parse().ok()?;
             total += n * unit;
             num.clear();
             matched = true;
-        } else {
-            return None;
         }
     }
     if !num.is_empty() || !matched {
