@@ -63,6 +63,42 @@ pub fn parse_spec(spec: &str) -> Option<SourceKind> {
 /// Group `[[quota.manual]]` entries by provider — duplicates are kept
 /// as separate windows of the same provider (a naive map would keep
 /// only the last; review checkpoint).
+/// Pure scan (review F6): per-prefix quota source resolution —
+/// (harvest-headers? map, source-name map) for the runtime snapshot.
+pub fn scan_sources(
+    cfg: &crate::config::Config,
+    registry: &crate::registry::Registry,
+) -> (
+    std::collections::BTreeMap<String, bool>,
+    std::collections::BTreeMap<String, String>,
+) {
+    let manual = manual_map(&cfg.quota.manual);
+    let mut harvest = std::collections::BTreeMap::new();
+    let mut sources = std::collections::BTreeMap::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for m in &registry.models {
+        let prefix = m.id.split('/').next().unwrap_or(&m.id).to_string();
+        if !seen.insert(prefix.clone()) {
+            continue;
+        }
+        let explicit = cfg.quota.sources.get(&prefix).map(|s| s.as_str());
+        if explicit.is_some_and(|s| s == "command" || s.starts_with("command:")) {
+            continue; // legacy path, not a headers source
+        }
+        let kind = resolve(
+            explicit,
+            &m.base_url,
+            manual.get(&prefix).map(|v| v.as_slice()),
+        );
+        harvest.insert(
+            prefix.clone(),
+            matches!(kind, crate::quotaeng::SourceKind::Headers),
+        );
+        sources.insert(prefix, describe_kind(&kind).to_string());
+    }
+    (harvest, sources)
+}
+
 pub fn manual_map(
     specs: &[crate::config::QuotaManualWindow],
 ) -> BTreeMap<String, Vec<crate::config::QuotaManualWindow>> {

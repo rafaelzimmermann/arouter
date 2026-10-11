@@ -138,22 +138,21 @@ pub fn admit(
     caller: &CallerIdentity,
     est_usd: f64,
 ) -> Result<ReserveGuard, Denial> {
-    let id = usage
-        .admit(
-            profile,
-            &caller.name,
-            crate::usage::RESERVATION_TTL_SECS,
-            |scope| {
-                check_all(
-                    |p, c, since| scope.spend_since(p, c, since),
-                    cfg,
-                    profile,
-                    caller,
-                    est_usd,
-                )
-                .map(|()| est_usd)
-            },
-        )?;
+    let id = usage.admit(
+        profile,
+        &caller.name,
+        crate::usage::RESERVATION_TTL_SECS,
+        |scope| {
+            check_all(
+                |p, c, since| scope.spend_since(p, c, since),
+                cfg,
+                profile,
+                caller,
+                est_usd,
+            )
+            .map(|()| est_usd)
+        },
+    )?;
     Ok(ReserveGuard {
         usage: usage.clone(),
         id,

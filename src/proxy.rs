@@ -50,19 +50,14 @@ mod req_hdr {
 pub const METRICS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 
 #[derive(Clone)]
-pub struct AppState {
+/// Everything derived from one config load (review F6): registry,
+/// callers, budgets/policy and quota wiring. Swapped ATOMICICALLY on
+/// hot-reload — a request that started on config N finishes on config
+/// N (candidates, caps and callers never mix generations).
+pub struct Runtime {
     pub cfg: Arc<Config>,
-    /// Hot-reloadable registry (SIGHUP / config mtime / discovery);
-    /// readers take an `Arc` snapshot via [`AppState::reg`].
-    pub registry: Arc<RwLock<Arc<Registry>>>,
-    pub usage: Arc<UsageLog>,
+    pub registry: Arc<Registry>,
     pub callers: Arc<CallerMap>,
-    pub metrics: Arc<Metrics>,
-    pub health: Arc<Health>,
-    /// aitop-derived quota state — replaced by E3b native intake
-    /// (fetchers + header harvest); still swapped by the legacy command
-    /// watcher when one is configured.
-    pub quota: Arc<quota::QuotaWatcher>,
     /// registry provider prefix → quota panel name.
     pub provider_map: Arc<quota::ProviderMap>,
     /// provider prefixes whose source is `headers` (E3b): the proxy
@@ -71,6 +66,43 @@ pub struct AppState {
     /// prefix → quota source name ("native:zai", "headers", …) for
     /// status provenance.
     pub quota_sources: Arc<std::collections::BTreeMap<String, String>>,
+}
+
+impl Runtime {
+    /// Build the full snapshot from a (possibly discovery-merged)
+    /// config. Pure — spawns nothing; pollers bind at startup.
+    pub fn build(cfg: Config, keys: &crate::config::KeyStore) -> Result<Runtime, String> {
+        let registry =
+            Arc::new(Registry::from_config(&cfg, keys).map_err(|e| format!("registry: {e}"))?);
+        let callers = Arc::new(CallerMap::from_config(&cfg, keys));
+        let provider_map = Arc::new(quota::ProviderMap {
+            explicit: cfg.quota.provider_map.clone(),
+        });
+        let (quota_harvest, quota_sources) = crate::quotaeng::scan_sources(&cfg, &registry);
+        Ok(Runtime {
+            cfg: Arc::new(cfg),
+            registry,
+            callers,
+            provider_map,
+            quota_harvest: Arc::new(quota_harvest),
+            quota_sources: Arc::new(quota_sources),
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct AppState {
+    /// Immutable runtime snapshot — hot-reload (SIGHUP / config mtime /
+    /// discovery) swaps the whole Arc; readers bind
+    /// `let rt = st.runtime();` for a consistent view.
+    pub runtime: Arc<RwLock<Arc<Runtime>>>,
+    pub usage: Arc<UsageLog>,
+    pub metrics: Arc<Metrics>,
+    pub health: Arc<Health>,
+    /// aitop-derived quota state — replaced by E3b native intake
+    /// (fetchers + header harvest); still swapped by the legacy command
+    /// watcher when one is configured.
+    pub quota: Arc<quota::QuotaWatcher>,
     /// ollama/llama.cpp residency + busy state (E8).
     pub local: Arc<crate::localeng::LocalEngines>,
     /// warm-cache stickiness for the local pool (E8).
@@ -80,10 +112,9 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Current registry snapshot — always bind `let reg = st.reg();`
-    /// before `attempt_list` (it returns refs borrowed from the registry).
-    pub fn reg(&self) -> Arc<Registry> {
-        self.registry.read().unwrap().clone()
+    /// Current runtime snapshot — bind once per request (review F6).
+    pub fn runtime(&self) -> Arc<Runtime> {
+        self.runtime.read().unwrap().clone()
     }
 }
 
@@ -224,7 +255,8 @@ async fn healthz() -> impl IntoResponse {
 }
 
 async fn status(State(st): State<AppState>) -> Response {
-    let reg = st.reg();
+    let rt = st.runtime();
+    let reg = &rt.registry;
     let snap = st.usage.snapshot();
     let health: serde_json::Map<String, serde_json::Value> = st
         .health
@@ -245,8 +277,8 @@ async fn status(State(st): State<AppState>) -> Response {
     let mut root = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_secs": st.started.elapsed().as_secs(),
-        "bind": st.cfg.server.bind,
-        "auth_required": st.cfg.auth.require,
+        "bind": rt.cfg.server.bind,
+        "auth_required": rt.cfg.auth.require,
         "pools": crate::config::POOLS,
         "profiles": reg
             .profiles
@@ -276,12 +308,12 @@ async fn status(State(st): State<AppState>) -> Response {
     // prefix, legacy snapshots under panel names — try both, then the
     // explicit map in reverse (zai → "z.ai").
     let source_for = |panel: &str| -> Option<String> {
-        st.quota_sources.get(panel).cloned().or_else(|| {
-            st.provider_map
+        rt.quota_sources.get(panel).cloned().or_else(|| {
+            rt.provider_map
                 .explicit
                 .iter()
                 .find(|(_, p)| p == &panel)
-                .and_then(|(prefix, _)| st.quota_sources.get(prefix).cloned())
+                .and_then(|(prefix, _)| rt.quota_sources.get(prefix).cloned())
         })
     };
     let providers: serde_json::Map<String, serde_json::Value> = q
@@ -318,7 +350,7 @@ async fn status(State(st): State<AppState>) -> Response {
                 // explicit aliases (config `[quota].provider_map`,
                 // legacy `[quota_watcher]`); the monitor uses them to
                 // attach models to quota panels
-                "provider_map": st.provider_map.explicit,
+                "provider_map": rt.provider_map.explicit,
             }),
         );
     }
@@ -356,6 +388,7 @@ async fn status(State(st): State<AppState>) -> Response {
 }
 
 async fn metrics_scrape(State(st): State<AppState>) -> Response {
+    let rt = st.runtime();
     let m = &st.metrics;
     m.gauge_set(
         metrics::N_BUILD_INFO,
@@ -369,7 +402,7 @@ async fn metrics_scrape(State(st): State<AppState>) -> Response {
         &[],
         st.started.elapsed().as_secs_f64(),
     );
-    let reg = st.reg();
+    let reg = &rt.registry;
     let mut profiles: Vec<&str> = vec!["default"];
     profiles.extend(reg.profiles.keys().map(|s| s.as_str()));
     for p in profiles {
@@ -468,9 +501,9 @@ fn hdr_str<'a>(headers: &'a HeaderMap, name: &HeaderName) -> Option<&'a str> {
 /// §Callers): bearer key → `[[callers]]` entry; open mode falls back to
 /// `X-Arouter-User`/`X-Arouter-Project` headers, else anonymous.
 /// Err = rejection message (401).
-fn resolve_caller(st: &AppState, headers: &HeaderMap) -> Result<CallerIdentity, String> {
+fn resolve_caller(callers: &CallerMap, headers: &HeaderMap) -> Result<CallerIdentity, String> {
     let bearer = bearer_of(headers);
-    st.callers.resolve(
+    callers.resolve(
         bearer.as_deref(),
         hdr_str(headers, &req_hdr::USER),
         hdr_str(headers, &req_hdr::PROJECT),
@@ -488,7 +521,10 @@ async fn handle_chat(
 ) -> Response {
     let t0 = Instant::now();
     let _in_flight = st.metrics.in_flight();
-    let caller = match resolve_caller(&st, headers) {
+    // review F6: one snapshot for the whole request — reloads swap the
+    // Arc under us, this request still finishes on the config it saw
+    let rt = st.runtime();
+    let caller = match resolve_caller(&rt.callers, headers) {
         Ok(c) => c,
         Err(msg) => return wire_error(wire, 401, "unauthorized", msg),
     };
@@ -500,7 +536,7 @@ async fn handle_chat(
             format!("{pool:?} (valid: {:?})", crate::config::POOLS),
         );
     }
-    let reg = st.reg();
+    let reg = rt.registry.clone();
     if profile != "default" && !reg.profiles.contains_key(profile) {
         let known: Vec<&str> = reg.profiles.keys().map(|s| s.as_str()).collect();
         return wire_error(
@@ -585,13 +621,13 @@ async fn handle_chat(
         let ordered = quota::order_candidates(
             &qstate,
             &st.health,
-            &st.provider_map,
+            &rt.provider_map,
             mode,
             &est,
             pre.clone(),
         )
         .into_iter()
-        .filter(|m| quota::model_available(&qstate, &st.provider_map, m))
+        .filter(|m| quota::model_available(&qstate, &rt.provider_map, m))
         .collect();
         // E8: residency boost (loaded local models float within their
         // grade), then warm-cache stickiness for the local pool.
@@ -607,6 +643,7 @@ async fn handle_chat(
     if !candidates.is_empty() {
         match try_candidates(
             &st,
+            &rt,
             &caller,
             profile,
             pool,
@@ -647,6 +684,7 @@ async fn handle_chat(
         tracing::info!(from = pool, to = %target, "cross-pool fallback");
         match try_candidates(
             &st,
+            &rt,
             &caller,
             profile,
             &target,
@@ -683,7 +721,7 @@ async fn handle_chat(
             }
         }
     }
-    let retry = quota::nearest_retry_unix(&qstate, &st.provider_map, &pre)
+    let retry = quota::nearest_retry_unix(&qstate, &rt.provider_map, &pre)
         .map(|t| t.saturating_sub(quota::unix_now()).max(1))
         .filter(|s| *s > 0);
     let mut extra: Vec<(header::HeaderName, String)> = vec![];
@@ -732,6 +770,7 @@ struct AttemptErr {
 #[allow(clippy::too_many_arguments)]
 async fn try_candidates(
     st: &AppState,
+    rt: &Runtime,
     caller: &CallerIdentity,
     profile: &str,
     pool: &str,
@@ -754,7 +793,7 @@ async fn try_candidates(
     for m in candidates
         .iter()
         // review F5: bound candidates per request (documented top-3)
-        .take(st.cfg.timeouts.max_attempts.max(1))
+        .take(rt.cfg.timeouts.max_attempts.max(1))
     {
         // Settled into relay_success / TapStream on success; dropped
         // (hold released) when this candidate fails (review F2).
@@ -774,7 +813,7 @@ async fn try_candidates(
                 continue;
             }
             let est_usd = quota::est_cost(m, est);
-            match budget::admit(&st.usage, &st.cfg, profile, caller, est_usd) {
+            match budget::admit(&st.usage, &rt.cfg, profile, caller, est_usd) {
                 Ok(g) => reserve = Some(g),
                 Err(d) => {
                     tracing::info!(
@@ -811,11 +850,11 @@ async fn try_candidates(
             rb = rb.bearer_auth(key);
         }
         let prefix = m.id.split('/').next().unwrap_or("").to_string();
-        let harvest = st.quota_harvest.get(&prefix).copied().unwrap_or(true);
+        let harvest = rt.quota_harvest.get(&prefix).copied().unwrap_or(true);
         // review F5: headers deadline — a connected upstream that never
         // answers fails over instead of hanging the request
         let resp = match tokio::time::timeout(
-            Duration::from_secs(st.cfg.timeouts.headers_secs),
+            Duration::from_secs(rt.cfg.timeouts.headers_secs),
             rb.send(),
         )
         .await
@@ -824,6 +863,7 @@ async fn try_candidates(
             Err(_) => {
                 record_failure(
                     st,
+                    rt,
                     m,
                     caller,
                     profile,
@@ -861,13 +901,14 @@ async fn try_candidates(
                         .and_then(|v| v.to_str().ok())
                         .unwrap_or("application/json")
                         .to_string();
-                    let idle = Duration::from_secs(st.cfg.timeouts.idle_secs);
+                    let idle = Duration::from_secs(rt.cfg.timeouts.idle_secs);
                     let bytes = match tokio::time::timeout(idle, resp.bytes()).await {
                         Ok(Ok(b)) => b,
                         Ok(Err(e)) => {
                             let msg = format!("body read failed: {e}");
                             record_failure(
                                 st,
+                                rt,
                                 m,
                                 caller,
                                 profile,
@@ -888,6 +929,7 @@ async fn try_candidates(
                             let msg = "buffered body stalled past idle_secs";
                             record_failure(
                                 st,
+                                rt,
                                 m,
                                 caller,
                                 profile,
@@ -908,6 +950,7 @@ async fn try_candidates(
                     st.health.record_success(&m.id);
                     return Ok(relay_success(
                         st,
+                        rt,
                         m,
                         caller,
                         profile,
@@ -928,6 +971,7 @@ async fn try_candidates(
                 st.health.record_success(&m.id);
                 return Ok(relay_success(
                     st,
+                    rt,
                     m,
                     caller,
                     profile,
@@ -969,6 +1013,7 @@ async fn try_candidates(
                 let msg = format!("upstream {code}: {body_text}");
                 record_failure(
                     st,
+                    rt,
                     m,
                     caller,
                     profile,
@@ -998,6 +1043,7 @@ async fn try_candidates(
                 let msg = e.to_string();
                 record_failure(
                     st,
+                    rt,
                     m,
                     caller,
                     profile,
@@ -1073,6 +1119,7 @@ fn truncate(s: &str, max: usize) -> String {
 #[allow(clippy::too_many_arguments)]
 fn record_failure(
     st: &AppState,
+    rt: &Runtime,
     m: &Model,
     caller: &CallerIdentity,
     profile: &str,
@@ -1090,7 +1137,7 @@ fn record_failure(
         caller: caller.name.clone(),
         project: caller.project.clone(),
         grade_requested: requested.into(),
-        grade_served: st.reg().ladder.token(m.grade_rank).into(),
+        grade_served: rt.registry.ladder.token(m.grade_rank).into(),
         model: m.id.clone(),
         status: status.into(),
         http_status,
@@ -1112,6 +1159,7 @@ fn record_failure(
 #[allow(clippy::too_many_arguments)]
 async fn relay_success(
     st: &AppState,
+    rt: &Runtime,
     m: &Model,
     caller: &CallerIdentity,
     profile: &str,
@@ -1127,7 +1175,7 @@ async fn relay_success(
     wire: Wire,
     reserve: Option<budget::ReserveGuard>,
 ) -> Response {
-    let reg = st.reg();
+    let reg = &rt.registry;
     let served = reg.ladder.token(m.grade_rank);
     let default_ct = if is_stream {
         "text/event-stream"
@@ -1196,7 +1244,7 @@ async fn relay_success(
         // the end of the stream (recorded in the usage log / metrics).
         if pool == "ondemand" {
             builder = builder.header(hdr::COST, format!("{:.6}", quota::est_cost(m, est)));
-            if let Some(rem) = budget::remaining_today(&st.usage, &st.cfg, profile, caller) {
+            if let Some(rem) = budget::remaining_today(&st.usage, &rt.cfg, profile, caller) {
                 builder = builder.header(hdr::BUDGET_REMAINING, format!("{:.6}", rem));
             }
         }
@@ -1246,7 +1294,7 @@ async fn relay_success(
         let rec = rec_meta(tin, tout, None, t0.elapsed().as_millis() as u64);
         if pool == "ondemand" {
             builder = builder.header(hdr::COST, format!("{:.6}", rec.cost_usd));
-            if let Some(rem) = budget::remaining_today(&st.usage, &st.cfg, profile, caller) {
+            if let Some(rem) = budget::remaining_today(&st.usage, &rt.cfg, profile, caller) {
                 builder = builder.header(hdr::BUDGET_REMAINING, format!("{:.6}", rem));
             }
         }
@@ -1283,7 +1331,8 @@ fn extract_usage(bytes: &[u8]) -> (Option<u64>, Option<u64>) {
 }
 
 async fn list_models(st: AppState, profile: &str, pool: &str) -> Response {
-    let reg = st.reg();
+    let rt = st.runtime();
+    let reg = &rt.registry;
     if profile != "default" && !reg.profiles.contains_key(profile) {
         return api_error(404, "unknown_profile", profile.to_string());
     }

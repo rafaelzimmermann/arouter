@@ -4,7 +4,7 @@
 //! `init`, `doctor`, `monitor` land in E5/E6.
 
 use arouter::catalog::Catalog;
-use arouter::config::{AutoGrades, CallerMap, Config, KeyStore, TimeoutsConfig};
+use arouter::config::{AutoGrades, Config, KeyStore, TimeoutsConfig};
 use arouter::discover;
 use arouter::health::{Health, HealthPolicy};
 use arouter::metrics::Metrics;
@@ -227,18 +227,23 @@ async fn serve(
     let keys = KeyStore::load_default(cfg.server.env_file.as_deref());
     let health = Health::new(HealthPolicy::default());
 
-    // initial registry: config + (optional) one discovery pass (startup is
+    // initial runtime: config + (optional) one discovery pass (startup is
     // allowed to be slower; serving must never be without candidates)
     let reloader = Reloader {
-        shared: Arc::new(RwLock::new(Arc::new(Registry::from_config(&cfg, &keys)?))),
+        shared: Arc::new(RwLock::new(Arc::new(
+            proxy::Runtime::build((*cfg).clone(), &keys)
+                .map_err(|e| anyhow::anyhow!("startup: {e}"))?,
+        ))),
         config_path: config.map(|p| p.to_path_buf()),
         http: proxy::client(&TimeoutsConfig::poll()),
         discovery_interval_secs: cfg.routing.discovery_interval_secs,
     };
     reloader.reload("startup").await;
-    let registry = reloader.shared.read().unwrap().clone();
+    let runtime = reloader.shared.read().unwrap().clone();
+    let registry = runtime.registry.clone();
+    // pollers (quota engine, discovery, mtime watch) bind the STARTUP
+    // config; serving state hot-reloads via the snapshot swap
 
-    let callers = Arc::new(CallerMap::from_config(&cfg, &keys));
     let usage = Arc::new(UsageLog::open(&cfg.server.state_dir)?);
     let metrics = Arc::new(Metrics::new());
     let bind = bind_override.unwrap_or_else(|| cfg.server.bind.clone());
@@ -252,15 +257,12 @@ async fn serve(
     // 900s default a healthy snapshot would spend 2/3 of each interval
     // penalized as stale (review checkpoint).
     quota.set_stale_after(quota::STALE_AFTER_SECS.max(cfg.quota.poll_secs.saturating_mul(2)));
-    let provider_map = Arc::new(quota::ProviderMap {
-        explicit: cfg.quota.provider_map.clone(),
-    });
-    let mut sources_by_prefix = std::collections::BTreeMap::new();
-    let quota_harvest = {
+    // native/manual quota pollers are STARTUP-bound (review F6 note);
+    // the runtime snapshot carries the source maps for serving.
+    {
         let now = quota::unix_now();
         let manual = arouter::quotaeng::manual_map(&cfg.quota.manual);
         let mut engine_sources = Vec::new();
-        let mut harvest = std::collections::BTreeMap::new();
         let mut seen = std::collections::BTreeSet::new();
         for m in &registry.models {
             let prefix = m.id.split('/').next().unwrap_or(&m.id).to_string();
@@ -275,14 +277,6 @@ async fn serve(
                 explicit,
                 &m.base_url,
                 manual.get(&prefix).map(|v| v.as_slice()),
-            );
-            harvest.insert(
-                prefix.clone(),
-                matches!(kind, arouter::quotaeng::SourceKind::Headers),
-            );
-            sources_by_prefix.insert(
-                prefix.clone(),
-                arouter::quotaeng::describe_kind(&kind).to_string(),
             );
             if matches!(
                 kind,
@@ -336,9 +330,7 @@ async fn serve(
                 quota::run_watcher(w, &cmd, interval).await;
             });
         }
-        Arc::new(harvest)
-    };
-    let quota_sources = Arc::new(sources_by_prefix);
+    }
 
     // E8: local-engine watcher (ollama /api/ps, llama.cpp /slots) and
     // warm-cache stickiness for the local pool.
@@ -366,16 +358,11 @@ async fn serve(
     }
 
     let state = proxy::AppState {
-        cfg: cfg.clone(),
-        registry: reloader.shared.clone(),
+        runtime: reloader.shared.clone(),
         usage: usage.clone(),
-        callers: callers.clone(),
         metrics: metrics.clone(),
         health: health.clone(),
-        quota_harvest,
-        quota_sources,
         quota,
-        provider_map,
         local,
         sticky,
         http: proxy::client(&cfg.timeouts),
@@ -389,7 +376,7 @@ async fn serve(
         env!("CARGO_PKG_VERSION"),
         registry.models.len(),
         registry.profiles.len(),
-        callers.len(),
+        runtime.callers.len(),
         cfg.auth.require
     );
     for pool in arouter::config::POOLS {
@@ -446,7 +433,8 @@ listening http://{bind} · {models} models",
 /// Rebuilds the registry from disk + discovery and swaps it in place.
 /// On any failure the previous registry keeps serving.
 struct Reloader {
-    shared: Arc<RwLock<Arc<Registry>>>,
+    /// Whole immutable snapshot — swapped atomically (review F6)
+    shared: Arc<RwLock<Arc<proxy::Runtime>>>,
     config_path: Option<PathBuf>,
     http: reqwest::Client,
     discovery_interval_secs: u64,
@@ -479,29 +467,30 @@ impl Reloader {
             Vec::new()
         };
         let merged = discover::merge_discovered(&cfg, &discovered, &auto, &catalog);
-        match Registry::from_config(&merged, &keys) {
-            Ok(reg) => {
-                let n = reg.models.len();
-                let manual = merged
+        // review F6: registry + callers + budgets + policy swap as ONE
+        // immutable snapshot — a request in flight keeps its generation
+        match proxy::Runtime::build(merged, &keys) {
+            Ok(rt) => {
+                let n = rt.registry.models.len();
+                let manual = rt
+                    .cfg
                     .models
                     .iter()
                     .filter(|m| m.provenance.is_empty())
                     .count();
-                *self.shared.write().unwrap() = Arc::new(reg);
+                *self.shared.write().unwrap() = Arc::new(rt);
                 if discovered.is_empty() {
-                    tracing::info!(
-                        "registry reloaded ({why}): {n} models (no new upstream models)"
-                    );
+                    tracing::info!("runtime reloaded ({why}): {n} models (no new upstream models)");
                 } else {
                     tracing::info!(
-                        "registry reloaded ({why}): {n} models (+{new} discovered, {manual} manual)",
+                        "runtime reloaded ({why}): {n} models (+{new} discovered, {manual} manual)",
                         new = discovered.len(),
                     );
                 }
                 true
             }
             Err(e) => {
-                tracing::error!("reload ({why}) — registry invalid, keeping old registry: {e}");
+                tracing::error!("reload ({why}) — invalid, keeping old runtime: {e}");
                 false
             }
         }

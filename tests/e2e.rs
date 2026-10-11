@@ -5,13 +5,12 @@
 //! caller identity, and the Prometheus /metrics endpoint.
 
 use arouter::config::{
-    CallerConfig, CallerMap, Config, FallbackConfig, KeyStore, ModelConfig, ProfileConfig,
-    TimeoutsConfig,
+    CallerConfig, Config, FallbackConfig, KeyStore, ModelConfig, ProfileConfig, TimeoutsConfig,
 };
 use arouter::health::{Health, HealthPolicy};
 use arouter::metrics::Metrics;
 use arouter::proxy;
-use arouter::quota::{self, ProviderMap, ProviderState, QuotaState, QuotaWatcher};
+use arouter::quota::{self, ProviderState, QuotaState, QuotaWatcher};
 use arouter::registry::Registry;
 use arouter::usage::UsageLog;
 use axum::body::Body;
@@ -132,6 +131,8 @@ struct TestApp {
     quota: Arc<QuotaWatcher>,
     local: Arc<arouter::localeng::LocalEngines>,
     sticky: Arc<arouter::localeng::StickyMap>,
+    /// handle onto the swappable runtime snapshot (F6 tests)
+    runtime: Arc<RwLock<Arc<proxy::Runtime>>>,
 }
 
 fn test_app(cfg: Config) -> TestApp {
@@ -145,9 +146,6 @@ fn test_app_health(cfg: Config, policy: HealthPolicy) -> TestApp {
 
 fn test_app_health_quota(cfg: Config, policy: HealthPolicy, quota_state: QuotaState) -> TestApp {
     let keys = KeyStore::default();
-    let registry = Arc::new(RwLock::new(Arc::new(
-        Registry::from_config(&cfg, &keys).unwrap(),
-    )));
     let dir = std::env::temp_dir().join(format!(
         "arouter-e2e-{}-{}",
         std::process::id(),
@@ -155,24 +153,21 @@ fn test_app_health_quota(cfg: Config, policy: HealthPolicy, quota_state: QuotaSt
     ));
     let usage = Arc::new(UsageLog::open(dir.to_str().unwrap()).unwrap());
     let metrics = Arc::new(Metrics::new());
-    let callers = Arc::new(CallerMap::from_config(&cfg, &keys));
     let health = Health::new(policy);
     let quota = QuotaWatcher::new(quota_state);
     let sticky_ttl = cfg.routing.sticky_local_secs;
     let http = proxy::client(&cfg.timeouts);
     let local = Arc::new(arouter::localeng::LocalEngines::default());
     let sticky = Arc::new(arouter::localeng::StickyMap::new(sticky_ttl));
+    let runtime = Arc::new(RwLock::new(Arc::new(
+        proxy::Runtime::build(cfg, &keys).unwrap(),
+    )));
     let state = proxy::AppState {
-        cfg: Arc::new(cfg),
-        registry,
+        runtime: runtime.clone(),
         usage: usage.clone(),
-        callers,
         metrics: metrics.clone(),
         health: health.clone(),
         quota: quota.clone(),
-        provider_map: Arc::new(ProviderMap::default()),
-        quota_harvest: Arc::new(Default::default()),
-        quota_sources: Arc::new(Default::default()),
         local: local.clone(),
         sticky: sticky.clone(),
         http,
@@ -186,6 +181,7 @@ fn test_app_health_quota(cfg: Config, policy: HealthPolicy, quota_state: QuotaSt
         quota,
         local,
         sticky,
+        runtime,
     }
 }
 
@@ -1160,6 +1156,57 @@ async fn per_caller_budget_denies_even_when_pool_allows() {
     h.insert("authorization", "Bearer alice-key".parse().unwrap());
     let resp = post_chat(&t.app, "/ondemand/v1/chat/completions", "A", false, h).await;
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn runtime_snapshot_swaps_whole_generation() {
+    // review F6: budgets/callers hot-reload WITH the registry — one
+    // atomic snapshot per request, new generations take effect
+    // immediately (previously caps were startup-frozen)
+    let up = good_json().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![model("or/x", "A", &["ondemand"], &up, 1.0, (1.0, 4.0))];
+    let t = test_app(cfg);
+
+    let resp = post_chat(
+        &t.app,
+        "/ondemand/v1/chat/completions",
+        "A",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // operator tightens the pool cap — hot-reload swaps the snapshot
+    let mut cfg2 = Config::default();
+    cfg2.models = vec![model("or/x", "A", &["ondemand"], &up, 1.0, (1.0, 4.0))];
+    cfg2.pool.insert(
+        "ondemand".into(),
+        PoolConfig {
+            preference: "cheapest".into(),
+            budget: Some(BudgetConfig {
+                daily_usd: 0.01,
+                ..BudgetConfig::default()
+            }),
+        },
+    );
+    let rt2 = proxy::Runtime::build(cfg2, &KeyStore::default()).unwrap();
+    *t.runtime.write().unwrap() = Arc::new(rt2);
+
+    // new requests are denied by the fresh cap — no restart needed
+    let resp = post_chat(
+        &t.app,
+        "/ondemand/v1/chat/completions",
+        "A",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::PAYMENT_REQUIRED);
+    let body = body_string(resp).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["error"]["budget"]["window"], "daily");
 }
 
 #[tokio::test]
