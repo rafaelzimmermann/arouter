@@ -26,6 +26,10 @@ impl Default for Ladder {
 pub struct GradeRequest {
     pub ceiling: usize,
     pub floor: Option<usize>,
+    /// True when the request came from a pool alias (`arouter-local` &c):
+    /// the client offered the whole ladder, so serving below the top
+    /// grade is routing, not degradation.
+    pub whole_ladder: bool,
 }
 
 pub const RANGE_SEP: &str = "..";
@@ -72,7 +76,21 @@ impl Ladder {
                 Some(r)
             }
         };
-        Some(GradeRequest { ceiling, floor })
+        Some(GradeRequest {
+            ceiling,
+            floor,
+            whole_ladder: false,
+        })
+    }
+
+    /// Full-ladder request for pool aliases: every rank offered, best
+    /// first — the routing strategy decides which model serves.
+    pub fn whole_ladder_request(&self) -> GradeRequest {
+        GradeRequest {
+            ceiling: 0,
+            floor: Some(self.worst()),
+            whole_ladder: true,
+        }
     }
 
     /// Ranks allowed by the fallback policy for a requested ceiling:
@@ -121,6 +139,16 @@ impl Ladder {
         }
     }
 
+    /// Ranks for a parsed request: the whole ladder when the request
+    /// came from a bare routing group (client delegated the choice),
+    /// else the fallback-policy set for the requested ceiling.
+    pub fn ranks_for(&self, req: &GradeRequest, allow: Option<&Vec<String>>) -> Vec<usize> {
+        if req.whole_ladder {
+            return (0..self.grades.len()).collect();
+        }
+        self.effective_ranks(req.ceiling, allow, req.floor)
+    }
+
     pub fn list(&self) -> String {
         self.grades.join(", ")
     }
@@ -137,21 +165,24 @@ mod tests {
             l.parse_request("A+"),
             Some(GradeRequest {
                 ceiling: 0,
-                floor: None
+                floor: None,
+                whole_ladder: false,
             })
         );
         assert_eq!(
             l.parse_request("A"),
             Some(GradeRequest {
                 ceiling: 1,
-                floor: None
+                floor: None,
+                whole_ladder: false,
             })
         );
         assert_eq!(
             l.parse_request(" B "),
             Some(GradeRequest {
                 ceiling: 2,
-                floor: None
+                floor: None,
+                whole_ladder: false,
             })
         );
     }
@@ -163,14 +194,16 @@ mod tests {
             l.parse_request("A+..A"),
             Some(GradeRequest {
                 ceiling: 0,
-                floor: Some(1)
+                floor: Some(1),
+                whole_ladder: false,
             })
         );
         assert_eq!(
             l.parse_request("A..C"),
             Some(GradeRequest {
                 ceiling: 1,
-                floor: Some(3)
+                floor: Some(3),
+                whole_ladder: false,
             })
         );
         // "A+.." == "A+"
@@ -178,7 +211,8 @@ mod tests {
             l.parse_request("A+.."),
             Some(GradeRequest {
                 ceiling: 0,
-                floor: None
+                floor: None,
+                whole_ladder: false,
             })
         );
         // same grade range is valid (strict)
@@ -186,7 +220,8 @@ mod tests {
             l.parse_request("A..A"),
             Some(GradeRequest {
                 ceiling: 1,
-                floor: Some(1)
+                floor: Some(1),
+                whole_ladder: false,
             })
         );
     }

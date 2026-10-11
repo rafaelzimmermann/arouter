@@ -7,10 +7,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::config::{default_config_path, home_dir, Config, POOLS};
-
-/// Provider entries we own inside pi's models.json (never anything else).
-pub const PI_PROVIDERS: [&str; 3] = ["arouter", "arouter-local", "arouter-ondemand"];
+use crate::config::{default_config_path, home_dir, Config, KeyStore};
+use crate::registry::Registry;
 
 /// One model entry in a pi provider block.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -81,99 +79,29 @@ pub fn merge_models_doc(
     serde_json::Value::Object(root)
 }
 
-/// Build the per-provider grade entries from the config: for each pool,
-/// the distinct grades of models visible there (manual config — discovery
-/// is the daemon's business).
-pub fn grade_entries(cfg: &Config) -> BTreeMap<String, Vec<PiModel>> {
-    let mut out: BTreeMap<String, Vec<PiModel>> = BTreeMap::new();
-    for pool in POOLS {
-        let prov: &str = match pool {
-            "quota" => "arouter",
-            "local" => "arouter-local",
-            "ondemand" => "arouter-ondemand",
-            _ => continue,
-        };
-        let ctx_max = cfg
-            .models
-            .iter()
-            .filter(|m| m.pool.iter().any(|p| p.as_str() == pool))
-            .filter_map(|m| m.context)
-            .max()
-            .unwrap_or(0);
-        let mut grades: Vec<String> = cfg
-            .models
-            .iter()
-            .filter(|m| m.pool.iter().any(|p| p.as_str() == pool) && m.profiles.is_empty())
-            .map(|m| m.grade.clone())
-            .collect();
-        grades.sort_by_key(|g| grade_order(g));
-        grades.dedup();
-        let models = grades
-            .into_iter()
-            .map(|g| PiModel {
-                id: g.clone(),
-                name: format!("{prov} {g}"),
-                context_window: if ctx_max > 0 { Some(ctx_max) } else { None },
-                max_tokens: default_max_tokens(&g, pool),
-                reasoning: default_reasoning(&g),
-            })
-            .collect();
-        out.insert(prov.to_string(), models);
-    }
-    // profile×pool entries for profiles with visible models
-    for prof in cfg.profiles.keys() {
-        for pool in POOLS {
-            let has = cfg.models.iter().any(|m| {
-                m.pool.iter().any(|p| p.as_str() == pool)
-                    && (m.profiles.is_empty() || m.profiles.iter().any(|pp| pp == prof))
+/// Build the client-facing routing-group entries for pi's `models.json`:
+/// a single `arouter` provider whose models are the config's routing
+/// groups (the `[[groups]]` defaults or the user's own list). A client
+/// picks a group; arouter's routing strategy picks the upstream.
+pub fn group_entries(cfg: &Config) -> Result<BTreeMap<String, Vec<PiModel>>> {
+    // resolve membership through the registry so group ladders, per-member
+    // overrides, and profile visibility match exactly what the daemon uses
+    let reg = Registry::from_config(cfg, &KeyStore::default())?;
+    let mut models: Vec<PiModel> = Vec::new();
+    for g in &reg.groups {
+        for (tok, ctx) in reg.group_grades("default", g) {
+            models.push(PiModel {
+                id: format!("{}-{}", g.id, tok),
+                name: format!("{}-{}", g.id, tok),
+                context_window: ctx,
+                max_tokens: default_max_tokens(&tok, g.pool.as_deref().unwrap_or("quota")),
+                reasoning: default_reasoning(&tok),
             });
-            if !has {
-                continue;
-            }
-            let name = if pool == "ondemand" {
-                format!("arouter-{prof}-ondemand")
-            } else if pool == "quota" {
-                format!("arouter-{prof}")
-            } else {
-                continue; // profile×local is rare; skip until asked for
-            };
-            let mut grades: Vec<String> = cfg
-                .models
-                .iter()
-                .filter(|m| {
-                    m.pool.iter().any(|p| p.as_str() == pool)
-                        && (m.profiles.is_empty() || m.profiles.iter().any(|pp| pp == prof))
-                })
-                .map(|m| m.grade.clone())
-                .collect();
-            grades.sort_by_key(|g| grade_order(g));
-            grades.dedup();
-            out.insert(
-                name,
-                grades
-                    .into_iter()
-                    .map(|g| PiModel {
-                        id: g.clone(),
-                        name: format!("arouter {g} (profile {prof})"),
-                        context_window: None,
-                        max_tokens: default_max_tokens(&g, pool),
-                        reasoning: default_reasoning(&g),
-                    })
-                    .collect(),
-            );
         }
     }
-    out
-}
-
-fn grade_order(g: &str) -> usize {
-    match g {
-        "A+" => 0,
-        "A" => 1,
-        "B" => 2,
-        "C" => 3,
-        _ => 9,
-    }
+    let mut out = BTreeMap::new();
+    out.insert("arouter".to_string(), models);
+    Ok(out)
 }
 
 fn default_max_tokens(grade: &str, pool: &str) -> u32 {
@@ -259,7 +187,7 @@ pub fn run(
     // 2. merge pi models.json
     let cfg = Config::load(Some(&config))?;
     let pi_path = home.join(".pi/agent/models.json");
-    let entries = grade_entries(&cfg);
+    let entries = group_entries(&cfg)?;
     let (models_json, bak) = {
         let existing = std::fs::read_to_string(&pi_path)
             .ok()
@@ -419,26 +347,80 @@ mod tests {
     }
 
     #[test]
-    fn grade_entries_per_pool() {
-        let entries = grade_entries(&cfg_with(
-            &[("A+", "quota"), ("A", "quota"), ("B", "local")],
+    fn group_entries_defaults_to_three_groups() {
+        let mut cfg = cfg_with(
+            &[
+                ("A+", "quota"),
+                ("A", "quota"),
+                ("B", "local"),
+                ("A", "ondemand"),
+            ],
             &[],
-        ));
-        assert_eq!(entries["arouter"].len(), 2);
-        assert_eq!(entries["arouter"][0].id, "A+");
-        assert_eq!(entries["arouter-local"].len(), 1);
-        assert_eq!(entries["arouter-local"][0].id, "B");
-        assert!(entries["arouter-ondemand"].is_empty());
+        );
+        cfg.models[0].context = Some(272000);
+        let entries = group_entries(&cfg).unwrap();
+        let ar = &entries["arouter"];
+        assert_eq!(
+            ar.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec![
+                "arouter-subscription-A+",
+                "arouter-subscription-A",
+                "arouter-local-B",
+                "arouter-ondemand-A"
+            ]
+        );
+        // per-grade context = max over the group's members at that grade
+        assert_eq!(ar[0].context_window, Some(272000));
+        assert_eq!(ar[1].context_window, None);
+        // reasoning follows the grade token
+        assert_eq!(ar[0].reasoning, Some(true)); // A+
+        assert_eq!(ar[2].reasoning, None); // B
+                                           // maxTokens: quota/ondemand vs local-B caps
+        assert_eq!(ar[0].max_tokens, 65536);
+        assert_eq!(ar[2].max_tokens, 16384);
+        assert_eq!(ar[3].max_tokens, 65536);
     }
 
     #[test]
-    fn profile_entries_generated() {
-        let entries = grade_entries(&cfg_with(&[("B", "quota")], &["night"]));
-        assert!(entries.contains_key("arouter-night"));
-        assert!(entries.contains_key("arouter-night-ondemand"));
-        // profile models are exclusive: quota pool still has B via the
-        // unprofiled model
-        assert_eq!(entries["arouter-night"][0].id, "B");
+    fn group_entries_uses_configured_groups() {
+        let mut cfg = cfg_with(&[("A", "quota")], &[]);
+        cfg.groups = vec![crate::config::GroupConfig {
+            id: "arouter-team".into(),
+            pool: None,
+            members: vec!["x/A-quota".into()],
+            grades: std::collections::BTreeMap::new(),
+            ladder: vec![],
+            fallback: vec![],
+        }];
+        let entries = group_entries(&cfg).unwrap();
+        let ar = &entries["arouter"];
+        assert_eq!(ar.len(), 1, "user-defined groups replace the defaults");
+        assert_eq!(ar[0].id, "arouter-team-A");
+        assert_eq!(ar[0].max_tokens, 65536); // member-form → quota cap
+    }
+
+    #[test]
+    fn profile_exclusive_models_stay_out_of_groups() {
+        // a profile-only quota model must not leak into the default
+        // arouter-subscription group's listing or metadata
+        let mut cfg = cfg_with(&[("B", "quota")], &["night"]);
+        cfg.models.push(crate::config::ModelConfig {
+            id: "x/A-only-night".into(),
+            grade: "A".into(),
+            pool: vec!["quota".into()],
+            profiles: vec!["night".into()],
+            context: Some(999999),
+            base_url: "http://127.0.0.1:9/v1".into(),
+            ..Default::default()
+        });
+        let entries = group_entries(&cfg).unwrap();
+        let ar = &entries["arouter"];
+        assert_eq!(
+            ar.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["arouter-subscription-B"],
+            "profile-only models stay off the default group surface"
+        );
+        assert_eq!(ar[0].context_window, None);
     }
 
     #[test]
@@ -476,7 +458,7 @@ mod tests {
         let cfg = cfg_with(&[("A+", "quota")], &[]);
         let mut cfg = cfg;
         cfg.models[0].context = Some(131072);
-        let entries = grade_entries(&cfg);
+        let entries = group_entries(&cfg).unwrap();
         let doc = merge_models_doc(
             serde_json::json!({"providers": {}}),
             entries,
@@ -517,6 +499,38 @@ mod tests {
             !provs.contains_key("arouter-deadprofile"),
             "orphaned profile entry cleaned up"
         );
+    }
+
+    #[test]
+    fn group_merge_collapses_the_provider_explosion() {
+        // the old surface had one provider per profile×pool; group merge
+        // owns a single `arouter` provider and cleans every other arouter-*
+        // entry, leaving foreign providers untouched
+        let existing = serde_json::json!({
+            "providers": {
+                "arouter-vip": {"api": "openai-completions", "models": []},
+                "arouter-codex-ondemand": {"api": "openai-completions", "models": []},
+                "zai": {"api": "openai-completions", "models": []}
+            }
+        });
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "arouter".to_string(),
+            vec![PiModel {
+                id: "arouter-subscription".into(),
+                name: "arouter-subscription".into(),
+                context_window: None,
+                max_tokens: 65536,
+                reasoning: Some(true),
+            }],
+        );
+        let merged = merge_models_doc(existing, entries, "127.0.0.1:3929", "local");
+        let provs = merged["providers"].as_object().unwrap();
+        assert_eq!(provs.len(), 2, "old arouter-* collapsed, foreign kept");
+        assert!(provs.contains_key("arouter"));
+        assert!(provs.contains_key("zai"));
+        assert_eq!(provs["arouter"]["models"][0]["id"], "arouter-subscription");
+        assert_eq!(provs["arouter"]["baseUrl"], "http://127.0.0.1:3929/v1");
     }
 
     #[test]

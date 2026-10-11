@@ -600,16 +600,68 @@ async fn handle_chat(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let Some(req) = reg.ladder.parse_request(&raw_model) else {
-        return wire_error(
-            wire,
-            400,
-            "unknown_grade",
-            format!(
-                "model {raw_model:?}: not a grade; valid: {}",
-                reg.ladder.list()
-            ),
-        );
+    // F13 routing groups (`[[groups]]`): `model: "arouter-subscription-A+"`
+    // pins a grade inside the group; the bare id `"arouter-subscription"`
+    // delegates to the whole ladder. Group ids may contain `-`, so match
+    // by exact id first, then `{id}-{grade}`. No group match → the legacy
+    // surface: a plain grade token on the path pool.
+    let group_sel: Option<(&crate::registry::Group, crate::grades::GradeRequest)> = {
+        let mut found = None;
+        for g in &reg.groups {
+            if raw_model == g.id {
+                found = Some((g, g.ladder.whole_ladder_request()));
+                break;
+            }
+            if let Some(gp) = raw_model.strip_prefix(&format!("{}-", g.id)) {
+                match g.ladder.parse_request(gp) {
+                    Some(r) => found = Some((g, r)),
+                    None => {
+                        return wire_error(
+                            wire,
+                            400,
+                            "unknown_grade",
+                            format!(
+                                "model {raw_model:?}: {gp:?} is not a grade of group {} ({})",
+                                g.id,
+                                g.ladder.list()
+                            ),
+                        )
+                    }
+                }
+                break;
+            }
+        }
+        found
+    };
+    let pool_owned;
+    let pool: &str = match &group_sel {
+        Some((g, _)) => {
+            pool_owned = g.pool.clone().unwrap_or_else(|| "quota".into());
+            pool_owned.as_str()
+        }
+        None => pool,
+    };
+    let req = match &group_sel {
+        Some((_, greq)) => *greq,
+        None => match reg.ladder.parse_request(&raw_model) {
+            Some(r) => r,
+            None => {
+                return wire_error(
+                    wire,
+                    400,
+                    "unknown_grade",
+                    format!(
+                        "model {raw_model:?}: not a routing group ({}) or grade ({})",
+                        reg.groups
+                            .iter()
+                            .map(|g| g.id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        reg.ladder.list()
+                    ),
+                )
+            }
+        },
     };
     let is_stream = payload
         .get("stream")
@@ -672,7 +724,48 @@ async fn handle_chat(
         (ordered, pre)
     };
 
-    let (candidates, pre) = build_candidates(pool);
+    // F13: the same pipeline over a group's membership/ladder. The
+    // quota/health heuristic, residency boost and (for local groups)
+    // warm-cache stickiness all apply unchanged.
+    let build_group = |g: &crate::registry::Group,
+                       greq: &crate::grades::GradeRequest|
+     -> (Vec<&Model>, Vec<&Model>) {
+        let pre: Vec<&Model> = reg
+            .group_attempt_list(profile, g, greq)
+            .into_iter()
+            .filter(|m| !st.health.is_excluded(&m.id))
+            .filter(|m| quota::context_fits(m, &est))
+            .collect();
+        let mode = match g.pool.as_deref() {
+            Some(p) => match reg.preference_for(profile, p) {
+                "cheapest" if p == "ondemand" => quota::OrderMode::Cheapest,
+                "fastest" => quota::OrderMode::Fastest,
+                _ => quota::OrderMode::QuotaPool,
+            },
+            None => quota::OrderMode::QuotaPool,
+        };
+        let ordered = quota::order_candidates(
+            &qstate,
+            &st.health,
+            &rt.provider_map,
+            mode,
+            &est,
+            pre.clone(),
+        )
+        .into_iter()
+        .filter(|m| quota::model_available(&qstate, &rt.provider_map, m))
+        .collect();
+        let mut ordered = crate::localeng::boost_residency(ordered, &st.local.current());
+        if g.pool.as_deref() == Some("local") {
+            ordered = crate::localeng::boost_sticky(ordered, &st.sticky, &caller.name);
+        }
+        (ordered, pre)
+    };
+
+    let (candidates, pre) = match &group_sel {
+        Some((g, greq)) => build_group(g, greq),
+        None => build_candidates(pool),
+    };
     let mut final_err: Option<AttemptErr> = None;
     if !candidates.is_empty() {
         match try_candidates(
@@ -698,15 +791,19 @@ async fn handle_chat(
         }
     }
 
-    // Cross-pool fallback: explicit opt-in only (routing.md §2) — the
-    // guard against surprise charges. Targets still pass their own
-    // budget preflight inside try_candidates.
-    let cross: Vec<String> = reg
-        .profiles
-        .get(profile)
-        .map(|p| p.fallback.cross_pool.clone())
-        .unwrap_or_else(|| reg.base_fallback.cross_pool.clone())
-        .unwrap_or_default();
+    // Cross-pool fallback: groups carry their own configured fallback
+    // list (F13); the legacy grade surface stays explicit opt-in only
+    // (routing.md §2) — the guard against surprise charges. Targets
+    // still pass their own budget preflight inside try_candidates.
+    let cross: Vec<String> = match &group_sel {
+        Some((g, _)) => g.fallback.clone(),
+        None => reg
+            .profiles
+            .get(profile)
+            .map(|p| p.fallback.cross_pool.clone())
+            .unwrap_or_else(|| reg.base_fallback.cross_pool.clone())
+            .unwrap_or_default(),
+    };
     for target in cross {
         if target == pool || !crate::config::POOLS.contains(&target.as_str()) {
             continue;
@@ -770,7 +867,14 @@ async fn handle_chat(
             wire,
             429,
             "arouter_exhausted",
-            format!("grade {raw_model} in pool {pool} (profile {profile}) exhausted: {detail}"),
+            format!(
+                "{} {raw_model} in pool {pool} (profile {profile}) exhausted: {detail}",
+                if group_sel.is_some() {
+                    "group"
+                } else {
+                    "grade"
+                }
+            ),
         );
         if let Some(secs) = retry {
             if let Ok(hv) = header::HeaderValue::from_str(&secs.to_string()) {
@@ -782,7 +886,14 @@ async fn handle_chat(
     api_error_with(
         429,
         "arouter_exhausted",
-        format!("grade {raw_model} in pool {pool} (profile {profile}) exhausted: {detail}"),
+        format!(
+            "{} {raw_model} in pool {pool} (profile {profile}) exhausted: {detail}",
+            if group_sel.is_some() {
+                "group"
+            } else {
+                "grade"
+            }
+        ),
         &extra,
     )
 }
@@ -834,6 +945,14 @@ async fn try_candidates(
         // review F5: bound candidates per request (documented top-3)
         .take(rt.cfg.timeouts.max_attempts.max(1))
     {
+        // F13: per-candidate serving pool — mixed-pool member-form groups
+        // need each member's own pool for the budget guards, headers and
+        // labels below. Identical to the request pool everywhere else.
+        let pool = if m.pools.iter().any(|p| p == pool) {
+            pool
+        } else {
+            m.pools.first().map(|s| s.as_str()).unwrap_or(pool)
+        };
         // Settled into relay_success / TapStream on success; dropped
         // (hold released) when this candidate fails (review F2).
         let mut reserve: Option<budget::ReserveGuard> = None;
@@ -946,7 +1065,7 @@ async fn try_candidates(
         };
         match resp {
             Ok(resp) if resp.status().is_success() => {
-                let degraded = m.grade_rank != req.ceiling;
+                let degraded = m.grade_rank != req.ceiling && !req.whole_ladder;
                 if harvest {
                     let w = quotaeng::harvest(resp.headers());
                     if !w.is_empty() {
@@ -1365,7 +1484,7 @@ async fn codex_attempt(
             &[(hdr::UPSTREAM, m.id.clone())],
         ));
     }
-    let degraded = m.grade_rank != req.ceiling;
+    let degraded = m.grade_rank != req.ceiling && !req.whole_ladder;
     let now = unix_now();
     let windows = crate::codex::quota_windows(resp.headers(), now);
     if harvest && !windows.is_empty() {
@@ -1683,14 +1802,24 @@ async fn list_models(st: AppState, profile: &str, pool: &str, headers: &HeaderMa
     if !crate::config::POOLS.contains(&pool) {
         return api_error(404, "unknown_pool", pool.to_string());
     }
-    let data: Vec<serde_json::Value> = (0..reg.ladder.grades.len())
-        .filter(|&rank| reg.has_exact(profile, pool, rank))
-        .map(|rank| {
-            serde_json::json!({
-                "id": reg.ladder.token(rank),
-                "object": "model",
-                "owned_by": "arouter",
-            })
+    // F13: `/v1/models` lists one entry per routing group × grade with
+    // models visible to the profile (`arouter-subscription-A+`, …). The
+    // bare group ids and legacy grade tokens stay accepted on requests
+    // but are no longer advertised.
+    let data: Vec<serde_json::Value> = reg
+        .groups
+        .iter()
+        .flat_map(|g| {
+            let gid = g.id.clone();
+            reg.group_grades(profile, g)
+                .into_iter()
+                .map(move |(tok, _)| {
+                    serde_json::json!({
+                        "id": format!("{gid}-{tok}"),
+                        "object": "model",
+                        "owned_by": "arouter",
+                    })
+                })
         })
         .collect();
     Json(serde_json::json!({ "object": "list", "data": data })).into_response()

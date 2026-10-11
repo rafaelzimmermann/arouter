@@ -52,6 +52,26 @@ pub struct Registry {
     pub base_fallback: FallbackConfig,
     /// pool name → preference (`cheapest` | `fastest` | `manual`)
     pub pool_preference: BTreeMap<String, String>,
+    /// Client-facing routing groups (`[[groups]]`, F13) — the surface
+    /// `/v1/models` lists and group requests route through.
+    pub groups: Vec<Group>,
+}
+
+/// A resolved routing group: membership + its own ladder + fallback
+/// pools. Pool-form groups (`pool = "quota"`) select models dynamically;
+/// member-form groups pin model indices with optional per-member ranks.
+#[derive(Debug, Clone)]
+pub struct Group {
+    pub id: String,
+    pub ladder: Ladder,
+    /// Membership form 1: every model in this pool.
+    pub pool: Option<String>,
+    /// Membership form 2: (model index, rank on the group ladder) pairs.
+    pub members: Vec<(usize, usize)>,
+    /// `grades` overrides (model index → rank), either membership form.
+    pub grade_overrides: BTreeMap<usize, usize>,
+    /// Pools tried, in order, when the group can't serve.
+    pub fallback: Vec<String>,
 }
 
 impl Registry {
@@ -59,7 +79,7 @@ impl Registry {
         cfg.validate().map_err(anyhow::Error::msg)?;
         let ladder = cfg.grades.ladder();
 
-        let models = cfg
+        let models: Vec<Model> = cfg
             .models
             .iter()
             .map(|m: &ModelConfig| Model {
@@ -130,12 +150,56 @@ impl Registry {
             })
             .collect();
 
+        let groups = cfg
+            .effective_groups()
+            .iter()
+            .map(|g| {
+                let gladder = if g.ladder.is_empty() {
+                    ladder.clone()
+                } else {
+                    crate::grades::Ladder::new(g.ladder.clone())
+                };
+                let members = g
+                    .members
+                    .iter()
+                    .filter_map(|id| cfg.models.iter().position(|cm| &cm.id == id))
+                    .map(|i| {
+                        let rank = g
+                            .grades
+                            .get(&cfg.models[i].id)
+                            .and_then(|t| gladder.rank(t))
+                            .or_else(|| gladder.rank(ladder.token(models[i].grade_rank)))
+                            .unwrap_or(gladder.worst());
+                        (i, rank)
+                    })
+                    .collect();
+                // grades overrides apply to either membership form
+                let grade_overrides = g
+                    .grades
+                    .iter()
+                    .filter_map(|(mid, tok)| {
+                        let i = cfg.models.iter().position(|cm| &cm.id == mid)?;
+                        Some((i, gladder.rank(tok)?))
+                    })
+                    .collect();
+                Group {
+                    id: g.id.clone(),
+                    ladder: gladder,
+                    pool: g.pool.clone(),
+                    members,
+                    grade_overrides,
+                    fallback: g.fallback.clone(),
+                }
+            })
+            .collect();
+
         Ok(Self {
             ladder,
             models,
             profiles,
             base_fallback: cfg.routing.fallback.clone(),
             pool_preference,
+            groups,
         })
     }
 
@@ -201,15 +265,122 @@ impl Registry {
         self.count_exact(profile, pool, rank) > 0
     }
 
+    /// Is any model visible to the profile in this pool at all? Drives
+    /// the routing-group listing on `/v1/models`.
+    pub fn has_pool(&self, profile: &str, pool: &str) -> bool {
+        self.models
+            .iter()
+            .any(|m| m.pools.iter().any(|p| p == pool) && self.visible(m, profile))
+    }
+
+    /// Group lookup by client-facing id.
+    pub fn group(&self, id: &str) -> Option<&Group> {
+        self.groups.iter().find(|g| g.id == id)
+    }
+
+    /// A model's rank on a group's ladder: explicit member rank first,
+    /// else its global grade token re-ranked on the group ladder.
+    fn group_rank(&self, g: &Group, idx: usize) -> Option<usize> {
+        if let Some(&(_, r)) = g.members.iter().find(|(i, _)| *i == idx) {
+            return Some(r);
+        }
+        if let Some(&r) = g.grade_overrides.get(&idx) {
+            return Some(r);
+        }
+        g.ladder
+            .rank(self.ladder.token(self.models[idx].grade_rank))
+    }
+
+    /// Is the model a member of the group (either membership form)?
+    fn in_group(&self, g: &Group, idx: usize) -> bool {
+        match g.pool.as_deref() {
+            Some(p) => self.models[idx].pools.iter().any(|x| x == p),
+            None => g.members.iter().any(|(i, _)| *i == idx),
+        }
+    }
+
+    /// Ordered attempt list for a group request, mirroring
+    /// `attempt_list` ordering but on the group ladder/membership:
+    /// best grade first, then pool preference (pool-form groups), then
+    /// weight, then id. Quota/health ordering happens downstream.
+    pub fn group_attempt_list(
+        &self,
+        profile: &str,
+        g: &Group,
+        req: &crate::grades::GradeRequest,
+    ) -> Vec<&Model> {
+        let ranks = g.ladder.ranks_for(req, None);
+        let preference = g
+            .pool
+            .as_deref()
+            .and_then(|p| self.pool_preference.get(p).map(|s| s.as_str()));
+        let mut idxs: Vec<usize> = (0..self.models.len())
+            .filter(|&i| self.in_group(g, i))
+            .filter(|&i| self.visible(&self.models[i], profile))
+            .filter(|&i| self.group_rank(g, i).is_some_and(|r| ranks.contains(&r)))
+            .collect();
+        idxs.sort_by(|&a, &b| {
+            let ra = self.group_rank(g, a).unwrap_or(usize::MAX);
+            let rb = self.group_rank(g, b).unwrap_or(usize::MAX);
+            ra.cmp(&rb)
+                .then_with(|| match preference {
+                    Some("cheapest") => self.models[a]
+                        .blended_cost
+                        .partial_cmp(&self.models[b].blended_cost)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                    _ => std::cmp::Ordering::Equal,
+                })
+                .then_with(|| {
+                    self.models[b]
+                        .weight
+                        .partial_cmp(&self.models[a].weight)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| self.models[a].id.cmp(&self.models[b].id))
+        });
+        idxs.into_iter().map(|i| &self.models[i]).collect()
+    }
+
+    /// Does the group have any model visible to the profile? Drives the
+    /// `/v1/models` group listing.
+    pub fn group_has_models(&self, profile: &str, g: &Group) -> bool {
+        match g.pool.as_deref() {
+            Some(p) => self.has_pool(profile, p),
+            None => (0..self.models.len())
+                .any(|i| self.in_group(g, i) && self.visible(&self.models[i], profile)),
+        }
+    }
+
+    /// Grade tokens of `g`'s ladder that have at least one member visible
+    /// to the profile, each with the max context window among members at
+    /// that rank (`None` when no member declares one). Drives the per-grade
+    /// `/v1/models` listing and pi's group-grade entries.
+    pub fn group_grades(&self, profile: &str, g: &Group) -> Vec<(String, Option<u64>)> {
+        (0..g.ladder.grades.len())
+            .filter_map(|rank| {
+                let members: Vec<usize> = (0..self.models.len())
+                    .filter(|&i| {
+                        self.in_group(g, i)
+                            && self.visible(&self.models[i], profile)
+                            && self.group_rank(g, i) == Some(rank)
+                    })
+                    .collect();
+                if members.is_empty() {
+                    return None;
+                }
+                let ctx = members.iter().filter_map(|&i| self.models[i].context).max();
+                Some((g.ladder.grades[rank].clone(), ctx))
+            })
+            .collect()
+    }
+
     /// Ordered attempt list (docs/routing.md §5): best grade first, then
     /// within a grade by the pool's preference (cheapest-first for
     /// on-demand), then weight, then id.
     pub fn attempt_list(&self, profile: &str, pool: &str, req: &GradeRequest) -> Vec<&Model> {
         let fb = self.fallback_for(profile);
         let ceiling_token = self.ladder.token(req.ceiling).to_string();
-        let ranks =
-            self.ladder
-                .effective_ranks(req.ceiling, fb.allow.get(&ceiling_token), req.floor);
+        let ranks = self.ladder.ranks_for(req, fb.allow.get(&ceiling_token));
         let preference = self.preference_for(profile, pool);
 
         let mut cands: Vec<&Model> = self
@@ -246,7 +417,7 @@ mod tests {
     #![allow(clippy::field_reassign_with_default)]
 
     use super::*;
-    use crate::config::{ModelConfig, ProfileConfig, VisibilityConfig};
+    use crate::config::{GroupConfig, ModelConfig, ProfileConfig, VisibilityConfig};
 
     fn ks() -> KeyStore {
         KeyStore::default()
@@ -536,5 +707,119 @@ mod tests {
         cfg.models = vec![model];
         let r = Registry::from_config(&cfg, &ks()).unwrap();
         assert_eq!(r.models[0].api_key.as_deref(), Some("tok-123"));
+    }
+
+    // ───────────────────────── routing groups (F13) ─────────────────────────
+
+    #[test]
+    fn default_groups_one_per_pool_with_local_fallback() {
+        let r = reg(vec![
+            m("zai/glm-5.3", "A+", &["quota"], 1.0, (0.0, 0.0)),
+            m("strata/qwen3.8", "B", &["local"], 1.0, (0.0, 0.0)),
+        ]);
+        assert_eq!(
+            r.groups.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(),
+            vec!["arouter-subscription", "arouter-local", "arouter-ondemand"]
+        );
+        let sub = r.group("arouter-subscription").unwrap();
+        assert_eq!(sub.pool.as_deref(), Some("quota"));
+        assert_eq!(sub.fallback, vec!["local".to_string()]);
+        assert!(r.group("arouter-local").unwrap().fallback.is_empty());
+        // pool form: every model of the pool, visibility respected
+        let got: Vec<&str> = r
+            .group_attempt_list("default", sub, &sub.ladder.whole_ladder_request())
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(got, vec!["zai/glm-5.3"]);
+        assert!(r.group_has_models("default", r.group("arouter-local").unwrap()));
+        assert!(!r.group_has_models("default", r.group("arouter-ondemand").unwrap()));
+    }
+
+    #[test]
+    fn member_group_ranks_and_grade_override() {
+        let mut cfg = Config::default();
+        cfg.models = vec![
+            m("y/super", "B", &["ondemand"], 1.0, (1.0, 3.0)),
+            m("z/super", "A", &["quota"], 1.0, (0.0, 0.0)),
+        ];
+        // z-super graded ABOVE y-super inside the group despite its
+        // global grade, via the per-member override
+        cfg.groups = vec![GroupConfig {
+            id: "arouter-custom2".into(),
+            pool: None,
+            members: vec!["y/super".into(), "z/super".into()],
+            grades: [("z/super".to_string(), "A+".to_string())]
+                .into_iter()
+                .collect(),
+            ladder: vec![],
+            fallback: vec![],
+        }];
+        let r = Registry::from_config(&cfg, &ks()).unwrap();
+        let g = r.group("arouter-custom2").unwrap();
+        // whole ladder: z/super (A+) before y/super (B)
+        let got: Vec<&str> = r
+            .group_attempt_list("default", g, &g.ladder.whole_ladder_request())
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(got, vec!["z/super", "y/super"]);
+        // pinned A+: only z/super is a member at that group grade
+        let got: Vec<&str> = r
+            .group_attempt_list("default", g, &g.ladder.parse_request("A+").unwrap())
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(got, vec!["z/super"]);
+    }
+
+    #[test]
+    fn group_ladder_override_and_custom_tokens() {
+        let mut cfg = Config::default();
+        cfg.models = vec![m("y/super", "A", &["quota"], 1.0, (0.0, 0.0))];
+        cfg.groups = vec![GroupConfig {
+            id: "arouter-team".into(),
+            pool: Some("quota".into()),
+            members: vec![],
+            grades: [("y/super".to_string(), "F".to_string())]
+                .into_iter()
+                .collect(),
+            // custom ladder + per-member override: y/super sits at the
+            // group's F token regardless of its global grade
+            ladder: vec!["S".into(), "A".into(), "F".into()],
+            fallback: vec![],
+        }];
+        let r = Registry::from_config(&cfg, &ks()).unwrap();
+        let g = r.group("arouter-team").unwrap();
+        assert_eq!(g.ladder.list(), "S, A, F");
+        // pinned S allows S or one lower (A) — F is two below, excluded
+        let got: Vec<&str> = r
+            .group_attempt_list("default", g, &g.ladder.parse_request("S").unwrap())
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+        assert!(got.is_empty());
+        // pinned A allows A or F → y/super serves
+        let got: Vec<&str> = r
+            .group_attempt_list("default", g, &g.ladder.parse_request("A").unwrap())
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(got, vec!["y/super"]);
+    }
+
+    #[test]
+    fn bare_group_request_spans_the_whole_ladder() {
+        // whole-ladder requests must not be clipped by the default
+        // "one grade lower" fallback policy (regression: B-only local
+        // group served nothing for bare arouter-local)
+        let r = reg(vec![m("strata/qwen3.8", "B", &["local"], 1.0, (0.0, 0.0))]);
+        let g = r.group("arouter-local").unwrap();
+        let got: Vec<&str> = r
+            .group_attempt_list("default", g, &g.ladder.whole_ladder_request())
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(got, vec!["strata/qwen3.8"]);
     }
 }

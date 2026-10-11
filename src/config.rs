@@ -10,6 +10,83 @@ use std::path::{Path, PathBuf};
 pub const POOLS: [&str; 3] = ["quota", "local", "ondemand"];
 pub const RESERVED_PROFILES: [&str; 3] = ["default", "local", "ondemand"];
 
+// ────────────────────────── routing groups ──────────────────────────
+
+/// `[[groups]]` — the client-facing model surface: `/v1/models` lists one
+/// entry per group×grade (e.g. `arouter-subscription-A+`,
+/// `arouter-subscription-A`, …). A client picks `group-grade`; the bare
+/// group id also works and delegates to the whole ladder. Membership,
+/// per-group ladder, and cross-pool fallback are all config; requests
+/// route through the standard strategy (grades → weights → quota/health
+/// ordering → failover). See `Config::effective_groups()` for the
+/// defaults applied when a config defines none.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct GroupConfig {
+    /// Client-facing id — the `{group}-{grade}` prefix clients send.
+    /// Must not collide with a grade token.
+    pub id: String,
+    /// Membership form 1: every model in this pool, at its configured
+    /// grade. Mutually independent of `members` — both may be set.
+    pub pool: Option<String>,
+    /// Membership form 2: explicit member model ids (registry ids).
+    #[serde(default)]
+    pub members: Vec<String>,
+    /// Per-member grade override inside the group (member id → token on
+    /// the group ladder). Unlisted members keep their configured grade.
+    #[serde(default)]
+    pub grades: BTreeMap<String, String>,
+    /// Group-local ladder override (default: the global `[grades] ladder`).
+    #[serde(default)]
+    pub ladder: Vec<String>,
+    /// Pools to try, in order, when the group itself can't serve.
+    #[serde(default)]
+    pub fallback: Vec<String>,
+}
+
+/// The default group surface, used only when a config defines no
+/// `[[groups]]` at all (once you define one, you own the full list):
+/// one group per pool, subscription and on-demand falling back to local.
+pub fn default_groups() -> Vec<GroupConfig> {
+    vec![
+        GroupConfig {
+            id: "arouter-subscription".into(),
+            pool: Some("quota".into()),
+            members: vec![],
+            grades: BTreeMap::new(),
+            ladder: vec![],
+            fallback: vec!["local".into()],
+        },
+        GroupConfig {
+            id: "arouter-local".into(),
+            pool: Some("local".into()),
+            members: vec![],
+            grades: BTreeMap::new(),
+            ladder: vec![],
+            fallback: vec![],
+        },
+        GroupConfig {
+            id: "arouter-ondemand".into(),
+            pool: Some("ondemand".into()),
+            members: vec![],
+            grades: BTreeMap::new(),
+            ladder: vec![],
+            fallback: vec!["local".into()],
+        },
+    ]
+}
+
+impl Config {
+    /// Effective routing groups: the configured `[[groups]]`, or the
+    /// pool defaults when none are defined.
+    pub fn effective_groups(&self) -> Vec<GroupConfig> {
+        if self.groups.is_empty() {
+            default_groups()
+        } else {
+            self.groups.clone()
+        }
+    }
+}
+
 // ────────────────────────────── schema ──────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -35,6 +112,9 @@ pub struct Config {
     pub pool: BTreeMap<String, PoolConfig>,
     pub profiles: BTreeMap<String, ProfileConfig>,
     pub models: Vec<ModelConfig>,
+    /// Client-facing routing groups (F13) — see `GroupConfig`.
+    #[serde(default)]
+    pub groups: Vec<GroupConfig>,
     pub auth: AuthConfig,
     pub callers: Vec<CallerConfig>,
     /// E10a web interface: static shell, sessions, claim bootstrap.
@@ -670,6 +750,78 @@ impl Config {
                 ));
             }
         }
+        // F13 routing groups — ids, membership, ladders, fallbacks
+        let groups = self.effective_groups();
+        let mut seen_groups = std::collections::HashSet::new();
+        for g in &groups {
+            if g.id.is_empty() {
+                return Err("group id must not be empty".into());
+            }
+            if g.id.contains(':') {
+                return Err(format!("group id {:?}: ':' is reserved", g.id));
+            }
+            if !seen_groups.insert(g.id.clone()) {
+                return Err(format!("duplicate group id {:?}", g.id));
+            }
+            if ladder.rank(&g.id).is_some() {
+                return Err(format!("group id {:?} collides with a grade token", g.id));
+            }
+            let gladder = if g.ladder.is_empty() {
+                ladder.clone()
+            } else {
+                let l = crate::grades::Ladder::new(g.ladder.clone());
+                if l.grades.len() < 2 {
+                    return Err(format!("group {}: ladder needs at least two grades", g.id));
+                }
+                if l.grades
+                    .iter()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+                    != l.grades.len()
+                {
+                    return Err(format!("group {}: ladder has duplicate grades", g.id));
+                }
+                l
+            };
+            if g.pool.is_none() && g.members.is_empty() {
+                return Err(format!("group {}: needs a pool or a members list", g.id));
+            }
+            if let Some(p) = &g.pool {
+                if !POOLS.contains(&p.as_str()) {
+                    return Err(format!(
+                        "group {}: unknown pool {p:?} (valid: {POOLS:?})",
+                        g.id
+                    ));
+                }
+            }
+            for t in &g.fallback {
+                if !POOLS.contains(&t.as_str()) {
+                    return Err(format!(
+                        "group {}: unknown fallback pool {t:?} (valid: {POOLS:?})",
+                        g.id
+                    ));
+                }
+            }
+            for m in &g.members {
+                if !self.models.iter().any(|cm| &cm.id == m) {
+                    return Err(format!("group {}: unknown member model {m:?}", g.id));
+                }
+            }
+            for (mid, tok) in &g.grades {
+                if !self.models.iter().any(|cm| &cm.id == mid) {
+                    return Err(format!(
+                        "group {}: grades override for unknown model {mid:?}",
+                        g.id
+                    ));
+                }
+                if gladder.rank(tok).is_none() {
+                    return Err(format!(
+                        "group {}: grades[{mid:?}] = {tok:?} is not a token of the group ladder",
+                        g.id
+                    ));
+                }
+            }
+        }
         for m in &self.models {
             if m.id.is_empty() {
                 return Err("model id must not be empty".into());
@@ -1212,5 +1364,105 @@ base_url = "https://x"
         cfg.validate().unwrap();
         let map = CallerMap::from_config(&cfg, &KeyStore::default());
         assert!(map.is_empty());
+    }
+
+    // ───────────────────────── routing groups (F13) ─────────────────────────
+
+    #[test]
+    fn groups_default_when_absent_and_owned_when_set() {
+        let mut cfg = Config::default();
+        // no [[groups]] → one per pool, subscription/ondemand → local
+        let g = cfg.effective_groups();
+        assert_eq!(
+            g.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(),
+            vec!["arouter-subscription", "arouter-local", "arouter-ondemand"]
+        );
+        assert_eq!(g[0].fallback, vec!["local".to_string()]);
+        cfg.groups = vec![GroupConfig {
+            id: "arouter-team".into(),
+            pool: Some("quota".into()),
+            ..default_groups().pop().unwrap()
+        }];
+        // one group defined → the user owns the whole list, no merging
+        assert_eq!(cfg.effective_groups().len(), 1);
+        assert_eq!(cfg.effective_groups()[0].id, "arouter-team");
+    }
+
+    #[test]
+    fn groups_parse_from_toml() {
+        let raw = r#"
+            [[models]]
+            id = "y/super"
+            grade = "A"
+            pool = ["quota"]
+            base_url = "http://y.test/v1"
+
+            [[groups]]
+            id = "arouter-custom2"
+            members = ["y/super"]
+            grades = { "y/super" = "A+" }
+            ladder = ["A+", "A", "B+"]
+            fallback = ["local"]
+
+            [[groups]]
+            id = "arouter-subscription"
+            pool = "quota"
+        "#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        cfg.validate().unwrap();
+        let g = cfg.effective_groups();
+        assert_eq!(g.len(), 2);
+        assert_eq!(g[0].members, vec!["y/super".to_string()]);
+        assert_eq!(g[0].grades.get("y/super").map(String::as_str), Some("A+"));
+        assert_eq!(g[1].pool.as_deref(), Some("quota"));
+    }
+
+    #[test]
+    fn group_validation_rejects_bad_config() {
+        let base = r#"
+            [[models]]
+            id = "y/super"
+            grade = "A"
+            pool = ["quota"]
+            base_url = "http://y.test/v1"
+        "#;
+        let bad = |groups: &str| {
+            let cfg: Config = toml::from_str(&format!("{base}\n{groups}")).unwrap();
+            cfg.validate().err().unwrap_or_default()
+        };
+        assert!(bad(r#"[[groups]]
+id = "x:y"
+pool = "quota""#)
+        .contains("reserved"));
+        assert!(bad(r#"[[groups]]
+id = "A+"
+pool = "quota""#)
+        .contains("collides with a grade token"));
+        assert!(bad(r#"[[groups]]
+id = "g"
+pool = "nope""#)
+        .contains("unknown pool"));
+        assert!(bad(r#"[[groups]]
+id = "g"
+pool = "quota"
+fallback = ["nope"]"#)
+        .contains("unknown fallback pool"));
+        assert!(bad(r#"[[groups]]
+id = "g""#)
+        .contains("needs a pool or a members list"));
+        assert!(bad(r#"[[groups]]
+id = "g"
+members = ["nope/model"]"#)
+        .contains("unknown member model"));
+        assert!(bad(r#"[[groups]]
+id = "g"
+pool = "quota"
+grades = { "y/super" = "Z9" }"#)
+        .contains("not a token of the group ladder"));
+        let cfg: Config = toml::from_str(&format!(
+            "{base}\n[[groups]]\nid = \"g\"\npool = \"quota\"\n[[groups]]\nid = \"g\"\npool = \"local\""
+        ))
+        .unwrap();
+        assert!(cfg.validate().unwrap_err().contains("duplicate group id"));
     }
 }
