@@ -145,6 +145,8 @@ fn test_app_health_quota(cfg: Config, policy: HealthPolicy, quota_state: QuotaSt
         health: health.clone(),
         quota: quota.clone(),
         provider_map: Arc::new(ProviderMap::default()),
+        quota_harvest: Arc::new(Default::default()),
+        quota_sources: Arc::new(Default::default()),
         local: local.clone(),
         sticky: sticky.clone(),
         http: proxy::client(),
@@ -791,6 +793,7 @@ fn quota_state_exhausted(provider: &str, reset_in_secs: u64) -> QuotaState {
             panel: provider.into(),
             error: None,
             stale: false,
+            updated_unix: None,
             windows: vec![quota::QuotaWindow {
                 label: "5h window".into(),
                 pct: 100.0,
@@ -857,6 +860,7 @@ async fn draining_provider_takes_matching_requests() {
     ];
     let now = quota::unix_now();
     let qs = QuotaState {
+        stale_after_secs: 0,
         fetched_unix: Some(now),
         providers: [
             (
@@ -865,6 +869,7 @@ async fn draining_provider_takes_matching_requests() {
                     panel: "a".into(),
                     error: None,
                     stale: false,
+                    updated_unix: None,
                     windows: vec![quota::QuotaWindow {
                         label: "weekly".into(),
                         pct: 76.0,
@@ -879,6 +884,7 @@ async fn draining_provider_takes_matching_requests() {
                     panel: "b".into(),
                     error: None,
                     stale: false,
+                    updated_unix: None,
                     windows: vec![quota::QuotaWindow {
                         label: "5h window".into(),
                         pct: 50.0,

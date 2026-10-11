@@ -194,8 +194,65 @@ pub async fn run(config_path: Option<&Path>, bind_override: Option<&str>) -> Rep
         ));
     }
 
-    // 6. quota watcher command runs? (shell-free argv, per config docs)
-    if let Some(cmd) = cfg.quota_watcher.command.as_deref() {
+    // 6. quota intake — what source serves each provider, and does it
+    // work? (E3b: native fetchers are the engine; a legacy command stays
+    // available as an escape hatch.)
+    let mut native: Vec<(String, &str)> = vec![]; // (prefix, spec)
+    let mut headers: Vec<String> = vec![];
+    let mut seen = std::collections::BTreeSet::new();
+    for m in &cfg.models {
+        let prefix = m.id.split('/').next().unwrap_or(&m.id).to_string();
+        if !seen.insert(prefix.clone()) {
+            continue;
+        }
+        let explicit = cfg.quota.sources.get(&prefix).map(|s| s.as_str());
+        if explicit.is_some_and(|s| s == "command" || s.starts_with("command:")) {
+            continue;
+        }
+        let kind = crate::quotaeng::resolve(explicit, &m.base_url, None);
+        match kind {
+            crate::quotaeng::SourceKind::Native(k) => {
+                let spec = match k {
+                    crate::quotaeng::NativeKind::OpenRouter => "native:openrouter",
+                    crate::quotaeng::NativeKind::Zai => "native:zai",
+                };
+                native.push((prefix, spec));
+            }
+            crate::quotaeng::SourceKind::Headers => headers.push(prefix),
+            crate::quotaeng::SourceKind::Off => lines.push((
+                Level::Warn,
+                format!("quota: {prefix} is `off` — routing is health-only for it"),
+            )),
+            crate::quotaeng::SourceKind::Manual(_) => lines.push((
+                Level::Ok,
+                format!("quota: {prefix} manual windows (config-pinned)"),
+            )),
+        }
+    }
+    if !native.is_empty() {
+        lines.push((
+            Level::Ok,
+            format!(
+                "quota: native fetch for {} — poll every {}s",
+                native
+                    .iter()
+                    .map(|(p, s)| format!("{p} ({s})"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                cfg.quota.poll_secs
+            ),
+        ));
+    }
+    if !headers.is_empty() {
+        lines.push((
+            Level::Ok,
+            format!(
+                "quota: header harvest for {} (learned from proxied responses)",
+                headers.join(", ")
+            ),
+        ));
+    }
+    if let Some(cmd) = cfg.quota.command.as_deref() {
         if !cmd.trim().is_empty() {
             let mut parts = cmd.split_whitespace();
             let prog = parts.next().unwrap_or("");

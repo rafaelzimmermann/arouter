@@ -20,6 +20,11 @@ pub struct Config {
     pub routing: RoutingConfig,
     #[serde(default)]
     pub quota_watcher: QuotaWatcherConfig,
+    /// E3b native intake: `[quota]` — the router asks its upstreams
+    /// directly. `[quota_watcher]` (external command) is still accepted
+    /// as a legacy alias; `[quota]` wins where both are set.
+    #[serde(default)]
+    pub quota: QuotaConfig,
     #[serde(default)]
     pub local_engines: LocalEnginesConfig,
     pub pool: BTreeMap<String, PoolConfig>,
@@ -146,6 +151,41 @@ impl QuotaWatcherConfig {
             .clone()
             .unwrap_or_else(|| "aitop --json".into())
     }
+}
+
+/// E3b: per-provider manual quota windows (for providers with no quota
+/// API at all — pinned by the owner, edited by the web UI later).
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct QuotaManualWindow {
+    /// Registry provider prefix (e.g. `zai`).
+    pub provider: String,
+    /// Window label shown in monitor/status (e.g. `weekly`).
+    pub label: String,
+    /// Percent used.
+    pub pct: f64,
+    /// Seconds until reset (absent/0 = never resets).
+    pub resets_in_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct QuotaConfig {
+    /// Seconds between native polls (0 disables the engine; quota then
+    /// comes only from harvested headers and manual windows).
+    pub poll_secs: u64,
+    /// Provider prefix → source spec: `headers` | `off` |
+    /// `native:openrouter` | `native:zai` | `manual`.
+    /// Unlisted providers: openrouter.ai → native:openrouter (documented),
+    /// everything else → headers.
+    pub sources: BTreeMap<String, String>,
+    /// Legacy escape hatch: run an external command for a whole snapshot
+    /// (aitop-shaped JSON). Mutually exclusive with native sources per
+    /// provider — explicit sources win.
+    pub command: Option<String>,
+    /// Registry provider prefix → panel name (as before, now per [quota]).
+    pub provider_map: BTreeMap<String, String>,
+    /// Manually pinned windows.
+    pub manual: Vec<QuotaManualWindow>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -400,6 +440,7 @@ impl Config {
                     .map_err(|e| anyhow::anyhow!("read {}: {e}", p.display()))?;
                 let cfg: Config = toml::from_str(&raw)
                     .map_err(|e| anyhow::anyhow!("parse {}: {e}", p.display()))?;
+                let cfg = cfg.merge_legacy_quota();
                 cfg.validate().map_err(anyhow::Error::msg)?;
                 Ok(cfg)
             }
@@ -417,7 +458,36 @@ impl Config {
         }
     }
 
+    /// E3b: `[quota_watcher]` → `[quota]` legacy merge. Fields already
+    /// set in `[quota]` win; the alias only fills gaps so existing
+    /// configs (and the integration rig) keep working unchanged.
+    pub fn merge_legacy_quota(mut self) -> Self {
+        let w = self.quota_watcher.clone();
+        if self.quota.poll_secs == 0 {
+            self.quota.poll_secs = w.interval_secs;
+        }
+        if self.quota.command.is_none() {
+            self.quota.command = w.command.clone();
+        }
+        for (k, v) in w.provider_map {
+            self.quota.provider_map.entry(k).or_insert(v);
+        }
+        self
+    }
+
     pub fn validate(&self) -> Result<(), String> {
+        // E3b: source specs must resolve
+        for (prefix, spec) in &self.quota.sources {
+            let known = crate::quotaeng::parse_spec(spec).is_some()
+                || spec == "command"
+                || spec.starts_with("command:");
+            if !known {
+                return Err(format!(
+                    "quota.sources.{prefix}: unknown source {spec:?} \
+                     (headers | off | native:openrouter | native:zai | manual | command:<cmd>)"
+                ));
+            }
+        }
         let ladder = self.grades.ladder();
         if ladder.grades.len() < 2 {
             return Err("grades.ladder needs at least two grades".into());

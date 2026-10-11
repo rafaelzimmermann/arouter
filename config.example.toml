@@ -49,15 +49,33 @@ sticky_local_secs = 600
 # allow = { "A+" = ["A+", "A"], "A" = ["A", "B"] }
 cross_pool = []   # never silently fall into the on-demand pool
 
-[quota_watcher]
-# E3: run `aitop --json` on an interval to learn quota windows, resets and
-# pace per provider. Feeds availability scoring (scarce/reset-soon/pace
-# penalties, exhausted → skip + reset-aware Retry-After) and /status.json.
-# 0 disables (routing then trusts health data only). Missing aitop warns
-# once and degrades — never fatal.
-interval_secs = 60
-# command = "aitop --json"        # any JSON-emitting command works
-# Registry provider prefix → aitop panel name; unmapped providers use
+[quota]
+# E3b: quota intake is native — the router asks its upstreams directly.
+# Per provider, resolved in this order:
+#   quota.sources."<prefix>"   explicit: headers | off | native:openrouter |
+#                              native:zai (undocumented endpoint, opt-in) |
+#                              manual | command:<cmd> (legacy escape hatch)
+#   openrouter.ai upstreams    → native:openrouter (documented /auth/key)
+#   everyone else              → headers: quota learned from x-ratelimit-*
+#                                headers of responses arouter already
+#                                proxies, plus 429 Retry-After (a 429 is
+#                                ground truth: exhausted until it says
+#                                otherwise).
+poll_secs = 900
+# z.ai uses an undocumented endpoint — explicit opt-in, never auto:
+# sources = { "zai" = "native:zai" }
+# Providers without any quota API: pin windows by hand (the web UI edits
+# these later):
+# [[quota.manual]]
+# provider = "strata"
+# label = "weekly"
+# pct = 5.0
+# resets_in_secs = 400000
+# Legacy whole-snapshot command (aitop-shaped JSON) still works; explicit
+# sources above always win. [quota_watcher] from older configs is read as
+# an alias for this section.
+# command = "aitop --json"
+# Registry provider prefix → quota panel name; unmapped providers use
 # exact then dot-stripped matching (zai → z.ai works out of the box).
 provider_map = { "or" = "openrouter" }
 

@@ -10,6 +10,11 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# sidecar host ports are overridable so the rig can run beside a
+# live observability stack on the same machine (review isolation)
+PROM_PORT="${RIG_PROM_PORT:-9090}"
+GRAF_PORT="${RIG_GRAF_PORT:-3300}"
+
 BASE=http://localhost:3939
 ALICE="Authorization: Bearer it-alice-key"
 FRUGAL="Authorization: Bearer it-frugal-key"
@@ -38,7 +43,7 @@ jqr()   { jq -r "$1" /tmp/it-b; }
 
 grafq() { # grafq <promql>: instant query through Grafana's datasource API
   jq -n --arg e "$1" '{queries:[{refId:"a",datasource:{uid:"arouter-prom",type:"prometheus"},expr:$e,instant:true}],from:"now-15m",to:"now"}' \
-    | curl -sS -m 10 localhost:3300/api/ds/query -H 'content-type: application/json' -d @-
+    | curl -sS -m 10 localhost:"$GRAF_PORT"/api/ds/query -H 'content-type: application/json' -d @-
 }
 mode() { curl -sS -m 10 -X POST "localhost:$2/__mode" -d "{\"mode\":\"$1\"}" >/dev/null; }
 aitop_mode() { curl -sS -m 10 -X POST localhost:9100/__mode -d "{\"mode\":\"$1\"}" >/dev/null; sleep 3; }
@@ -232,21 +237,21 @@ check "unknown grade → 4xx error"       '[ "$(code)" = 400 ] || [ "$(code)" = 
 # ── 12. observability (prometheus + grafana sidecars) ─────────────────────
 say "observability"
 for i in $(seq 1 30); do
-  h=$(curl -sS -m 5 localhost:9090/api/v1/targets 2>/dev/null | jq -r '.data.activeTargets[]? | select(.labels.job=="arouter") | .health')
+  h=$(curl -sS -m 5 localhost:"$PROM_PORT"/api/v1/targets 2>/dev/null | jq -r '.data.activeTargets[]? | select(.labels.job=="arouter") | .health')
   [ "$h" = up ] && break
   sleep 1
 done
 check "prometheus target up" \
-  '[ "$(curl -sS -m 5 localhost:9090/api/v1/query --data-urlencode "query=up{job=\"arouter\"}" | jq -r ".data.result[0].value[1]")" = 1 ]'
+  '[ "$(curl -sS -m 5 localhost:"$PROM_PORT"/api/v1/query --data-urlencode "query=up{job=\"arouter\"}" | jq -r ".data.result[0].value[1]")" = 1 ]'
 # instant sum after `fresh_arouter`'s mid-matrix restart (streaming +
 # failover + hot-reload sections all land after it) — stable across runs,
 # unlike the pre-restart peak
 check "matrix traffic captured" \
-  '[ "$(curl -sS -m 5 localhost:9090/api/v1/query --data-urlencode "query=sum(arouter_requests_total)" | jq -r ".data.result[0].value[1]" | awk "{print int(\$1)}")" -gt 3 ]'
+  '[ "$(curl -sS -m 5 localhost:"$PROM_PORT"/api/v1/query --data-urlencode "query=sum(arouter_requests_total)" | jq -r ".data.result[0].value[1]" | awk "{print int(\$1)}")" -gt 3 ]'
 check "drain gauge scraped" \
-  '[ "$(curl -sS -m 5 localhost:9090/api/v1/query --data-urlencode "query=arouter_quota_drain_reset_secs" | jq -r ".data.result | length")" -gt 0 ]'
+  '[ "$(curl -sS -m 5 localhost:"$PROM_PORT"/api/v1/query --data-urlencode "query=arouter_quota_drain_reset_secs" | jq -r ".data.result | length")" -gt 0 ]'
 check "grafana dashboard provisioned" \
-  '[ "$(curl -sS -m 5 localhost:3300/api/dashboards/uid/arouter | jq -r ".dashboard.title")" = "arouter" ]'
+  '[ "$(curl -sS -m 5 localhost:"$GRAF_PORT"/api/dashboards/uid/arouter | jq -r ".dashboard.title")" = "arouter" ]'
 # /api/ds/query reports per-result HTTP status (200) on success
 check "grafana panel query: request rate" \
   '[ "$(grafq "sum(rate(arouter_requests_total[2m]))" | jq -r ".results.a.status")" = 200 ]'

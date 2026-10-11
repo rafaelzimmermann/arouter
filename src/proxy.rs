@@ -7,6 +7,7 @@ use crate::config::{CallerIdentity, CallerMap, Config};
 use crate::health::Health;
 use crate::metrics::{self, Metrics};
 use crate::quota;
+use crate::quotaeng;
 use crate::registry::{Model, Registry};
 use crate::usage::{unix_now, UsageLog, UsageRecord};
 use axum::body::{Body, Bytes};
@@ -58,10 +59,18 @@ pub struct AppState {
     pub callers: Arc<CallerMap>,
     pub metrics: Arc<Metrics>,
     pub health: Arc<Health>,
-    /// aitop-derived quota state, swapped by the watcher task (E3).
+    /// aitop-derived quota state — replaced by E3b native intake
+    /// (fetchers + header harvest); still swapped by the legacy command
+    /// watcher when one is configured.
     pub quota: Arc<quota::QuotaWatcher>,
-    /// registry provider prefix → aitop panel name.
+    /// registry provider prefix → quota panel name.
     pub provider_map: Arc<quota::ProviderMap>,
+    /// provider prefixes whose source is `headers` (E3b): the proxy
+    /// harvests x-ratelimit-*/429 Retry-After into quota state.
+    pub quota_harvest: Arc<std::collections::BTreeMap<String, bool>>,
+    /// prefix → quota source name ("native:zai", "headers", …) for
+    /// status provenance.
+    pub quota_sources: Arc<std::collections::BTreeMap<String, String>>,
     /// ollama/llama.cpp residency + busy state (E8).
     pub local: Arc<crate::localeng::LocalEngines>,
     /// warm-cache stickiness for the local pool (E8).
@@ -255,20 +264,35 @@ async fn status(State(st): State<AppState>) -> Response {
             .collect::<Vec<_>>(),
         "health": health,
     });
-    // E3: quota snapshot — panel windows + computed availability.
+    // E3b: quota — panel windows + computed availability (per-provider
+    // staleness: the newest signal wins).
     let q = st.quota.current();
     let now = crate::quota::unix_now();
-    let snap_stale = q.is_stale(now);
+    // panel key → source name: engine/harvest write under the registry
+    // prefix, legacy snapshots under panel names — try both, then the
+    // explicit map in reverse (zai → "z.ai").
+    let source_for = |panel: &str| -> Option<String> {
+        st.quota_sources.get(panel).cloned().or_else(|| {
+            st.provider_map
+                .explicit
+                .iter()
+                .find(|(_, p)| p == &panel)
+                .and_then(|(prefix, _)| st.quota_sources.get(prefix).cloned())
+        })
+    };
     let providers: serde_json::Map<String, serde_json::Value> = q
         .providers
         .iter()
         .map(|(panel, ps)| {
-            let avail = crate::quota::provider_availability(Some(ps), snap_stale, now);
+            let avail =
+                crate::quota::provider_availability(Some(ps), q.provider_stale(ps, now), now);
             (
                 panel.clone(),
                 serde_json::json!({
                     "stale": ps.stale,
                     "error": ps.error,
+                    "source": source_for(panel),
+                    "updated_unix": ps.updated_unix,
                     "availability": (avail.score * 1000.0).round() / 1000.0,
                     "notes": avail.notes,
                     "windows": ps.windows.iter().map(|w| serde_json::json!({
@@ -285,10 +309,11 @@ async fn status(State(st): State<AppState>) -> Response {
             "quota".into(),
             serde_json::json!({
                 "fetched_unix": q.fetched_unix,
-                "stale": snap_stale,
+                "stale": q.is_stale(now),
                 "providers": providers,
-                // explicit aliases (config `[quota_watcher].provider_map`);
-                // the monitor uses them to attach models to quota panels
+                // explicit aliases (config `[quota].provider_map`,
+                // legacy `[quota_watcher]`); the monitor uses them to
+                // attach models to quota panels
                 "provider_map": st.provider_map.explicit,
             }),
         );
@@ -741,10 +766,18 @@ async fn try_candidates(
         if let Some(key) = &m.api_key {
             rb = rb.bearer_auth(key);
         }
+        let prefix = m.id.split('/').next().unwrap_or("").to_string();
+        let harvest = st.quota_harvest.get(&prefix).copied().unwrap_or(true);
         match rb.send().await {
             Ok(resp) if resp.status().is_success() => {
                 let degraded = m.grade_rank != req.ceiling;
                 st.health.record_success(&m.id);
+                if harvest {
+                    let w = quotaeng::harvest(resp.headers());
+                    if !w.is_empty() {
+                        st.quota.apply(&prefix, w, unix_now());
+                    }
+                }
                 return Ok(relay_success(
                     st, m, caller, profile, pool, raw_model, degraded, is_stream, resp, t0, est,
                     cross_from, wire,
@@ -753,6 +786,24 @@ async fn try_candidates(
             }
             Ok(resp) => {
                 let code = resp.status().as_u16();
+                // E3b: a 429 is ground truth — the provider is exhausted
+                // until Retry-After says otherwise, whatever its quota
+                // API last claimed.
+                if harvest && code == 429 {
+                    let ra = resp
+                        .headers()
+                        .get(header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.trim().parse::<u64>().ok())
+                        .unwrap_or(60);
+                    st.quota
+                        .apply(&prefix, vec![quotaeng::harvest_429(ra)], unix_now());
+                } else if harvest {
+                    let w = quotaeng::harvest(resp.headers());
+                    if !w.is_empty() {
+                        st.quota.apply(&prefix, w, unix_now());
+                    }
+                }
                 let body_text = truncate(&resp.text().await.unwrap_or_default(), 300);
                 let msg = format!("upstream {code}: {body_text}");
                 record_failure(

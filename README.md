@@ -42,7 +42,7 @@ Point any OpenAI-compatible client at `http://localhost:3929/v1` with model `A+`
 
 **Grades, pools, profiles.** You request `A+`, `A`, `B` — or a range like `"A+..A"` to cap degradation. Pools are hard boundaries: `/v1` = your subscriptions/quotas (default), `/local/v1` = local engines, `/ondemand/v1` = pay-per-token. Profiles add per-task overlays: `arouter-night-ondemand:A+` brings its own ladder, budgets and model visibility. Falling back from a free pool into a paid one is explicit opt-in (`cross_pool = ["ondemand"]`) and always labeled in the response.
 
-**Quota awareness.** arouter runs `aitop --json` on an interval and scores each provider: exhausted windows are skipped until their reset (arouter's own 429 carries a reset-aware `Retry-After`), scarce windows and too-fast burn rates are deprioritized, equally-healthy providers spread by remaining headroom. Windows resetting within 4h enter **drain mode** — penalties lift and ties resolve toward the soonest reset, so expiring quota gets spent instead of wasted. Live numbers: `/status.json` and the `arouter_quota_*` gauges.
+**Quota awareness.** arouter asks its upstreams for quota directly: the documented OpenRouter key endpoint by default, `x-ratelimit-*` headers harvested from the responses it already proxies (a 429 is ground truth — exhausted until its `Retry-After` says otherwise), an opt-in fetcher for z.ai coding plans, and hand-pinned windows for providers with no quota API at all. It then scores each provider: exhausted windows are skipped until their reset (arouter's own 429 carries a reset-aware `Retry-After`), scarce windows and too-fast burn rates are deprioritized, equally-healthy providers spread by remaining headroom. Windows resetting within 4h enter **drain mode** — penalties lift and ties resolve toward the soonest reset, so expiring quota gets spent instead of wasted. Live numbers: `/status.json` and the `arouter_quota_*` gauges.
 
 **On-demand budgets.** Chargeable attempts pass stacked spend guards before leaving arouter: pool budget, per-profile budget, per-caller daily cap — tightest wins. Responses carry `X-Arouter-Cost-Usd` and `X-Arouter-Budget-Remaining-Today`.
 
@@ -90,7 +90,7 @@ curl http://127.0.0.1:3929/v1/messages -H 'content-type: application/json' \
 
 ## Integration tests
 
-A black-box Docker rig (`tests/integration/`) drives the real daemon against stub upstreams with runtime-flippable behavior (ok · stream · 500 · 429 · 400 · slow) and a fake `aitop` — 37 checks covering the routing matrix: grade ladder and ranges, pool boundaries, quota-aware skips (hit counters prove an exhausted provider is never contacted), failover, budget 402 breakdowns, cross-pool fallback, SSE streaming, caller attribution, SIGHUP hot-reload, and the observability stack end-to-end.
+A black-box Docker rig (`tests/integration/`) drives the real daemon against stub upstreams with runtime-flippable behavior (ok · stream · 500 · 429 · 400 · slow) and a fake quota feed — 37 checks covering the routing matrix: grade ladder and ranges, pool boundaries, quota-aware skips (hit counters prove an exhausted provider is never contacted), failover, budget 402 breakdowns, cross-pool fallback, SSE streaming, caller attribution, SIGHUP hot-reload, and the observability stack end-to-end.
 
 ```sh
 cd tests/integration

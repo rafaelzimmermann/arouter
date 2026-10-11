@@ -243,21 +243,102 @@ async fn serve(
     let metrics = Arc::new(Metrics::new());
     let bind = bind_override.unwrap_or_else(|| cfg.server.bind.clone());
 
-    // E3: quota watcher — spawns `aitop --json` on an interval and swaps
-    // the snapshot behind an RwLock. Missing aitop degrades to
-    // health-only routing (warned once, not fatal).
+    // E3b: native quota intake — the router asks its upstreams directly
+    // (openrouter /auth/key by default, z.ai monitor opt-in, headers
+    // harvested from proxied responses, manual windows). The external
+    // command stays as a legacy escape hatch, never the default.
     let quota = quota::QuotaWatcher::new(quota::QuotaState::default());
+    // Freshness must track the poll interval, not a fixed 300s: with the
+    // 900s default a healthy snapshot would spend 2/3 of each interval
+    // penalized as stale (review checkpoint).
+    quota.set_stale_after(quota::STALE_AFTER_SECS.max(cfg.quota.poll_secs.saturating_mul(2)));
     let provider_map = Arc::new(quota::ProviderMap {
-        explicit: cfg.quota_watcher.provider_map.clone(),
+        explicit: cfg.quota.provider_map.clone(),
     });
-    if cfg.quota_watcher.interval_secs > 0 {
-        let cmd = cfg.quota_watcher.command_or_default();
-        let interval = std::time::Duration::from_secs(cfg.quota_watcher.interval_secs);
-        let w = quota.clone();
-        tokio::spawn(async move {
-            quota::run_watcher(w, &cmd, interval).await;
-        });
-    }
+    let mut sources_by_prefix = std::collections::BTreeMap::new();
+    let quota_harvest = {
+        let now = quota::unix_now();
+        let manual = arouter::quotaeng::manual_map(&cfg.quota.manual);
+        let mut engine_sources = Vec::new();
+        let mut harvest = std::collections::BTreeMap::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for m in &registry.models {
+            let prefix = m.id.split('/').next().unwrap_or(&m.id).to_string();
+            if !seen.insert(prefix.clone()) {
+                continue;
+            }
+            let explicit = cfg.quota.sources.get(&prefix).map(|s| s.as_str());
+            if explicit.is_some_and(|s| s == "command" || s.starts_with("command:")) {
+                continue; // legacy path, handled globally below
+            }
+            let kind = arouter::quotaeng::resolve(
+                explicit,
+                &m.base_url,
+                manual.get(&prefix).map(|v| v.as_slice()),
+            );
+            harvest.insert(
+                prefix.clone(),
+                matches!(kind, arouter::quotaeng::SourceKind::Headers),
+            );
+            sources_by_prefix.insert(
+                prefix.clone(),
+                arouter::quotaeng::describe_kind(&kind).to_string(),
+            );
+            if matches!(
+                kind,
+                arouter::quotaeng::SourceKind::Native(_) | arouter::quotaeng::SourceKind::Manual(_)
+            ) {
+                engine_sources.push(arouter::quotaeng::ProviderSource {
+                    prefix,
+                    kind,
+                    base_url: m.base_url.clone(),
+                    api_key: m.api_key.clone(),
+                });
+            }
+        }
+        if !engine_sources.is_empty() {
+            if cfg.quota.poll_secs > 0 {
+                let (w, http) = (quota.clone(), proxy::client());
+                let secs = cfg.quota.poll_secs;
+                tracing::info!(
+                    "quota engine: {} native/manual source(s), poll every {secs}s",
+                    engine_sources.len()
+                );
+                tokio::spawn(async move {
+                    arouter::quotaeng::run_engine(w, http, engine_sources, secs).await
+                });
+            } else {
+                // polling disabled: apply manual windows once so the
+                // monitor still shows them
+                for s in &engine_sources {
+                    if let arouter::quotaeng::SourceKind::Manual(specs) = &s.kind {
+                        let w = arouter::quotaeng::manual_windows(specs, now);
+                        quota.apply(&s.prefix, w, now);
+                    }
+                }
+            }
+        }
+        // legacy escape hatch: whole snapshots from an external command
+        if let Some(cmd) = cfg
+            .quota
+            .command
+            .clone()
+            .filter(|c| !c.trim().is_empty())
+            .filter(|_| cfg.quota.poll_secs > 0)
+        {
+            let interval = std::time::Duration::from_secs(cfg.quota.poll_secs);
+            let w = quota.clone();
+            tracing::info!(
+                "quota watcher (legacy command): {cmd:?} every {}s",
+                interval.as_secs()
+            );
+            tokio::spawn(async move {
+                quota::run_watcher(w, &cmd, interval).await;
+            });
+        }
+        Arc::new(harvest)
+    };
+    let quota_sources = Arc::new(sources_by_prefix);
 
     // E8: local-engine watcher (ollama /api/ps, llama.cpp /slots) and
     // warm-cache stickiness for the local pool.
@@ -291,6 +372,8 @@ async fn serve(
         callers: callers.clone(),
         metrics: metrics.clone(),
         health: health.clone(),
+        quota_harvest,
+        quota_sources,
         quota,
         provider_map,
         local,

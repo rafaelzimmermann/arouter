@@ -17,6 +17,7 @@ pub mod metrics;
 pub mod monitor;
 pub mod proxy;
 pub mod quota;
+pub mod quotaeng;
 pub mod registry;
 pub mod translate;
 pub mod usage;

@@ -141,7 +141,7 @@ impl Pace {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct QuotaWindow {
     pub label: String,
     pub pct: f64,
@@ -153,9 +153,13 @@ pub struct QuotaWindow {
 pub struct ProviderState {
     pub panel: String,
     pub error: Option<String>,
-    /// aitop says these numbers are the last good ones, not live.
+    /// the source says these numbers are the last good ones, not live.
     pub stale: bool,
     pub windows: Vec<QuotaWindow>,
+    /// Last per-provider update (native fetch / header harvest).
+    /// `None` for whole-snapshot (command) sources → fall back to
+    /// snapshot age for staleness.
+    pub updated_unix: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -163,6 +167,10 @@ pub struct QuotaState {
     pub fetched_unix: Option<u64>,
     /// key: aitop panel name (e.g. "z.ai", "codex")
     pub providers: BTreeMap<String, ProviderState>,
+    /// 0 = use `STALE_AFTER_SECS`. main sets `max(STALE_AFTER_SECS,
+    /// 2 × poll interval)` so a healthy snapshot isn't penalized as
+    /// stale between polls (review checkpoint: freshness ↔ polling).
+    pub stale_after_secs: u64,
 }
 
 impl QuotaState {
@@ -196,12 +204,14 @@ impl QuotaState {
                     error: p.error,
                     stale: p.stale.unwrap_or(false),
                     windows,
+                    updated_unix: None,
                 },
             );
         }
         Self {
             fetched_unix,
             providers,
+            stale_after_secs: 0,
         }
     }
 
@@ -210,8 +220,37 @@ impl QuotaState {
         self.fetched_unix.map(|t| now.saturating_sub(t))
     }
 
+    /// Effective staleness cutoff (configured override or const floor).
+    fn stale_cut(&self) -> u64 {
+        if self.stale_after_secs > 0 {
+            self.stale_after_secs
+        } else {
+            STALE_AFTER_SECS
+        }
+    }
+
     pub fn is_stale(&self, now: u64) -> bool {
-        self.age_secs(now).is_none_or(|a| a > STALE_AFTER_SECS)
+        self.age_secs(now).is_none_or(|a| a > self.stale_cut())
+    }
+
+    /// Per-provider staleness: the newest signal wins — windows
+    /// harvested 30s ago keep a provider fresh even when the snapshot
+    /// behind them is old.
+    pub fn provider_stale(&self, p: &ProviderState, now: u64) -> bool {
+        match p.updated_unix {
+            Some(u) => now.saturating_sub(u) > self.stale_cut(),
+            None => self.is_stale(now) || p.stale,
+        }
+    }
+
+    /// Option-taking variant for call sites that resolve a provider
+    /// that may never have been seen (None → snapshot age; availability
+    /// treats "no data" separately anyway).
+    pub fn provider_stale_soft(&self, p: Option<&ProviderState>, now: u64) -> bool {
+        match p {
+            Some(p) => self.provider_stale(p, now),
+            None => self.is_stale(now),
+        }
     }
 }
 
@@ -238,7 +277,10 @@ impl Default for Availability {
 
 pub fn provider_availability(
     p: Option<&ProviderState>,
-    snapshot_age_stale: bool,
+    // per-provider staleness (QuotaState::provider_stale) — the newest
+    // signal wins: recently harvested windows keep a provider fresh
+    // even when the snapshot behind them is old
+    stale: bool,
     now: u64,
 ) -> Availability {
     let mut a = Availability::default();
@@ -273,7 +315,7 @@ pub fn provider_availability(
     if let Some(w) = draining(Some(p), now) {
         a.notes
             .push(format!("draining ({} {:.0}%)", w.label, w.pct));
-        if p.stale || snapshot_age_stale {
+        if stale || p.stale {
             a.score *= STALE_PENALTY;
             a.notes.push("stale".into());
         }
@@ -296,7 +338,7 @@ pub fn provider_availability(
         a.score *= PACE_AHEAD_PENALTY;
         a.notes.push("pace ahead".into());
     }
-    if p.stale || snapshot_age_stale {
+    if stale || p.stale {
         a.score *= STALE_PENALTY;
         a.notes.push("stale".into());
     }
@@ -396,8 +438,60 @@ impl QuotaWatcher {
         self.state.read().unwrap().clone()
     }
 
+    /// Freshness cutoff, derived from the poll interval at startup.
+    pub fn set_stale_after(&self, secs: u64) {
+        let cur = self.current();
+        let mut qs = QuotaState::clone(&cur);
+        qs.stale_after_secs = secs;
+        self.set(qs);
+    }
+
     fn set(&self, qs: QuotaState) {
         *self.state.write().unwrap() = Arc::new(qs);
+    }
+
+    /// Incremental per-provider update (E3b): replace one provider's
+    /// windows, keeping everyone else's. Used by native fetches and
+    /// header harvest — the whole snapshot is only ever swapped by the
+    /// legacy command watcher.
+    pub fn apply(&self, provider: &str, windows: Vec<QuotaWindow>, now: u64) {
+        let current = self.current();
+        let mut qs = QuotaState::clone(&current);
+        let entry = qs
+            .providers
+            .entry(provider.to_string())
+            .or_insert_with(|| ProviderState {
+                panel: provider.to_string(),
+                error: None,
+                stale: false,
+                windows: vec![],
+                updated_unix: None,
+            });
+        entry.windows = windows;
+        entry.error = None;
+        entry.stale = false;
+        entry.updated_unix = Some(now);
+        qs.fetched_unix = Some(qs.fetched_unix.map_or(now, |t| t.max(now)));
+        self.set(qs);
+    }
+
+    /// Whole-snapshot swap for the legacy command watcher — but a
+    /// provider whose last signal is NEWER than the snapshot (native
+    /// fetch, header harvest, manual window) is preserved: the command
+    /// never erases fresher knowledge (review checkpoint).
+    pub fn merge_snapshot(&self, mut qs: QuotaState) {
+        let cur = self.current();
+        qs.stale_after_secs = cur.stale_after_secs;
+        let snap_time = qs.fetched_unix;
+        for (k, existing) in &cur.providers {
+            if existing
+                .updated_unix
+                .is_some_and(|t| snap_time.is_none_or(|s| t > s))
+            {
+                qs.providers.insert(k.clone(), existing.clone());
+            }
+        }
+        self.set(qs);
     }
 }
 
@@ -428,7 +522,7 @@ pub async fn run_watcher(watcher: Arc<QuotaWatcher>, command: &str, interval: Du
                 let text = String::from_utf8_lossy(&o.stdout);
                 let qs = QuotaState::parse(&text);
                 let n = qs.providers.len();
-                watcher.set(qs);
+                watcher.merge_snapshot(qs);
                 tracing::debug!("quota snapshot: {n} providers");
             }
             Ok(Ok(o)) => {
@@ -525,14 +619,13 @@ pub fn order_candidates<'a>(
     candidates: Vec<&'a Model>,
 ) -> Vec<&'a Model> {
     let now = unix_now();
-    let snapshot_stale = quota.is_stale(now);
 
     let scored: Vec<_> = candidates
         .into_iter()
         .map(|m| {
             let provider = m.id.split('/').next().unwrap_or(&m.id);
             let ps = provider_map.resolve(provider, &quota.providers);
-            let avail = provider_availability(ps, snapshot_stale, now).score;
+            let avail = provider_availability(ps, quota.provider_stale_soft(ps, now), now).score;
             let health_penalty = health.penalty(&m.id);
             let hr = headroom(ps, now);
             // §7 drain: reset unix of the dying window, soonest first;
@@ -587,7 +680,7 @@ pub fn order_candidates<'a>(
 pub fn model_available(quota: &QuotaState, map: &ProviderMap, m: &Model) -> bool {
     let provider = m.id.split('/').next().unwrap_or(&m.id);
     let ps = map.resolve(provider, &quota.providers);
-    provider_availability(ps, quota.is_stale(unix_now()), unix_now()).score > 0.0
+    provider_availability(ps, quota.provider_stale_soft(ps, unix_now()), unix_now()).score > 0.0
 }
 
 /// Nearest quota-driven retry point among candidates (unix secs), for
@@ -598,13 +691,12 @@ pub fn nearest_retry_unix(
     candidates: &[&Model],
 ) -> Option<u64> {
     let now = unix_now();
-    let snapshot_stale = quota.is_stale(now);
     candidates
         .iter()
         .filter_map(|m| {
             let provider = m.id.split('/').next().unwrap_or(&m.id);
             let ps = provider_map.resolve(provider, &quota.providers);
-            provider_availability(ps, snapshot_stale, now).retry_after_unix
+            provider_availability(ps, quota.provider_stale_soft(ps, now), now).retry_after_unix
         })
         .min()
 }
@@ -703,6 +795,7 @@ mod tests {
             panel: "x".into(),
             error: None,
             stale: false,
+            updated_unix: None,
             windows: pcts_resets
                 .iter()
                 .enumerate()
@@ -783,6 +876,7 @@ mod tests {
         let mut slow_p = panel(&[(50.0, Some(now + 5 * 86400))], None);
         slow_p.panel = "slow".into();
         let quota = QuotaState {
+            stale_after_secs: 0,
             fetched_unix: Some(now),
             providers: BTreeMap::from([("z.ai".into(), zai_p), ("slow".into(), slow_p)]),
         };
@@ -815,6 +909,7 @@ mod tests {
         let mut b_p = panel(&[(50.0, Some(now + 1800))], None);
         b_p.panel = "b".into();
         let quota = QuotaState {
+            stale_after_secs: 0,
             fetched_unix: Some(now),
             providers: BTreeMap::from([("a".into(), a_p), ("b".into(), b_p)]),
         };
