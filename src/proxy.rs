@@ -600,21 +600,21 @@ async fn handle_chat(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    // F13 routing groups (`[[groups]]`): `model: "arouter-subscription"`
-    // (bare group — whole ladder, the strategy picks the upstream) or
-    // `"arouter-subscription:B"` / `":A+..A"` to pin a grade inside the
-    // group. Not a group → the legacy surface: a plain grade token on
-    // the path pool.
-    let (gname, ggrade) = match raw_model.split_once(':') {
-        Some((n, gp)) => (n, Some(gp)),
-        None => (raw_model.as_str(), None),
-    };
-    let group_sel = match reg.group(gname) {
-        Some(g) => {
-            let greq = match ggrade {
-                None => g.ladder.whole_ladder_request(),
-                Some(gp) => match g.ladder.parse_request(gp) {
-                    Some(r) => r,
+    // F13 routing groups (`[[groups]]`): `model: "arouter-subscription-A+"`
+    // pins a grade inside the group; the bare id `"arouter-subscription"`
+    // delegates to the whole ladder. Group ids may contain `-`, so match
+    // by exact id first, then `{id}-{grade}`. No group match → the legacy
+    // surface: a plain grade token on the path pool.
+    let group_sel: Option<(&crate::registry::Group, crate::grades::GradeRequest)> = {
+        let mut found = None;
+        for g in &reg.groups {
+            if raw_model == g.id {
+                found = Some((g, g.ladder.whole_ladder_request()));
+                break;
+            }
+            if let Some(gp) = raw_model.strip_prefix(&format!("{}-", g.id)) {
+                match g.ladder.parse_request(gp) {
+                    Some(r) => found = Some((g, r)),
                     None => {
                         return wire_error(
                             wire,
@@ -627,11 +627,11 @@ async fn handle_chat(
                             ),
                         )
                     }
-                },
-            };
-            Some((g, greq))
+                }
+                break;
+            }
         }
-        None => None,
+        found
     };
     let pool_owned;
     let pool: &str = match &group_sel {
@@ -1802,20 +1802,24 @@ async fn list_models(st: AppState, profile: &str, pool: &str, headers: &HeaderMa
     if !crate::config::POOLS.contains(&pool) {
         return api_error(404, "unknown_pool", pool.to_string());
     }
-    // F13: `/v1/models` lists the routing groups (`[[groups]]`) with
-    // models visible to the profile — the whole client-facing surface.
-    // The legacy grade tokens stay accepted on requests but are no
-    // longer advertised.
+    // F13: `/v1/models` lists one entry per routing group × grade with
+    // models visible to the profile (`arouter-subscription-A+`, …). The
+    // bare group ids and legacy grade tokens stay accepted on requests
+    // but are no longer advertised.
     let data: Vec<serde_json::Value> = reg
         .groups
         .iter()
-        .filter(|g| reg.group_has_models(profile, g))
-        .map(|g| {
-            serde_json::json!({
-                "id": g.id,
-                "object": "model",
-                "owned_by": "arouter",
-            })
+        .flat_map(|g| {
+            let gid = g.id.clone();
+            reg.group_grades(profile, g)
+                .into_iter()
+                .map(move |(tok, _)| {
+                    serde_json::json!({
+                        "id": format!("{gid}-{tok}"),
+                        "object": "model",
+                        "owned_by": "arouter",
+                    })
+                })
         })
         .collect();
     Json(serde_json::json!({ "object": "list", "data": data })).into_response()

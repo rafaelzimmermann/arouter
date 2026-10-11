@@ -351,6 +351,29 @@ impl Registry {
         }
     }
 
+    /// Grade tokens of `g`'s ladder that have at least one member visible
+    /// to the profile, each with the max context window among members at
+    /// that rank (`None` when no member declares one). Drives the per-grade
+    /// `/v1/models` listing and pi's group-grade entries.
+    pub fn group_grades(&self, profile: &str, g: &Group) -> Vec<(String, Option<u64>)> {
+        (0..g.ladder.grades.len())
+            .filter_map(|rank| {
+                let members: Vec<usize> = (0..self.models.len())
+                    .filter(|&i| {
+                        self.in_group(g, i)
+                            && self.visible(&self.models[i], profile)
+                            && self.group_rank(g, i) == Some(rank)
+                    })
+                    .collect();
+                if members.is_empty() {
+                    return None;
+                }
+                let ctx = members.iter().filter_map(|&i| self.models[i].context).max();
+                Some((g.ladder.grades[rank].clone(), ctx))
+            })
+            .collect()
+    }
+
     /// Ordered attempt list (docs/routing.md §5): best grade first, then
     /// within a grade by the pool's preference (cheapest-first for
     /// on-demand), then weight, then id.

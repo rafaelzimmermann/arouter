@@ -752,7 +752,7 @@ async fn profile_exclusivity_and_routing() {
         .await
         .unwrap();
     let body = body_string(resp).await;
-    assert!(body.contains("\"arouter-subscription\""), "{body}");
+    assert!(body.contains("\"arouter-subscription-A+\""), "{body}");
 }
 
 #[tokio::test]
@@ -773,14 +773,15 @@ async fn models_endpoint_lists_routing_groups() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_string(resp).await;
-    // groups with models are listed — pools without models are not
-    assert!(body.contains("\"arouter-subscription\""), "{body}");
-    assert!(body.contains("\"arouter-local\""), "{body}");
+    // one entry per group×grade — pools without models are absent
+    assert!(body.contains("\"arouter-subscription-A+\""), "{body}");
+    assert!(body.contains("\"arouter-local-B\""), "{body}");
     assert!(
-        !body.contains("\"arouter-ondemand\""),
+        !body.contains("arouter-ondemand"),
         "group without models must be absent: {body}"
     );
-    // grades are no longer advertised
+    // bare groups and bare grades are no longer advertised
+    assert!(!body.contains("\"arouter-subscription\""), "{body}");
     assert!(!body.contains("\"A+\""), "{body}");
 }
 
@@ -823,7 +824,7 @@ async fn routing_groups_bare_grade_pinned_and_fallback() {
     let resp = post_chat(
         &t.app,
         "/v1/chat/completions",
-        "arouter-local:B",
+        "arouter-local-B",
         false,
         HeaderMap::new(),
     )
@@ -835,7 +836,7 @@ async fn routing_groups_bare_grade_pinned_and_fallback() {
     let resp = post_chat(
         &t.app,
         "/v1/chat/completions",
-        "arouter-local:Z9",
+        "arouter-local-Z9",
         false,
         HeaderMap::new(),
     )

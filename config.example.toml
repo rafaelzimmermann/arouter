@@ -33,11 +33,12 @@ require = false
 [grades]
 ladder = ["A+", "A", "B", "C"]
 
-# Client-facing routing groups — the models `/v1/models` lists and
-# clients pick. `arouter-subscription` = every quota-pool model at its
-# configured grade, falling back to local when the pool can't serve;
-# requests send the bare id (whole ladder — the routing strategy picks
-# the upstream) or `id:GRADE` to pin a grade (e.g. "arouter-ondemand:A").
+# Client-facing routing groups — `/v1/models` lists one entry per group×grade
+# (`arouter-subscription-A+`, `arouter-subscription-A`, …).
+# `arouter-subscription` = every quota-pool model at its configured grade,
+# falling back to local when the pool can't serve; clients send `group-grade`
+# (e.g. "arouter-ondemand-A") to pin a grade, or the bare group id to let
+# the routing strategy pick anywhere on the ladder.
 # Member-form groups are equally valid: members = ["y/super", ...] with
 # optional per-member grades = { "y/super" = "A+" } overrides and a
 # group-local ladder. Define none and these three defaults apply.

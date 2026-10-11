@@ -12,17 +12,18 @@ pub const RESERVED_PROFILES: [&str; 3] = ["default", "local", "ondemand"];
 
 // ────────────────────────── routing groups ──────────────────────────
 
-/// `[[groups]]` — the client-facing model surface: named entries that
-/// `/v1/models` lists and clients pick (e.g. `arouter-subscription` or
-/// `arouter-subscription:B` to pin a grade inside the group). Membership,
+/// `[[groups]]` — the client-facing model surface: `/v1/models` lists one
+/// entry per group×grade (e.g. `arouter-subscription-A+`,
+/// `arouter-subscription-A`, …). A client picks `group-grade`; the bare
+/// group id also works and delegates to the whole ladder. Membership,
 /// per-group ladder, and cross-pool fallback are all config; requests
 /// route through the standard strategy (grades → weights → quota/health
-/// ordering → failover). See `Config::groups()` for the defaults applied
-/// when a config defines none.
+/// ordering → failover). See `Config::effective_groups()` for the
+/// defaults applied when a config defines none.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct GroupConfig {
-    /// Client-facing id — also the `model:` value clients send. Must not
-    /// contain `:` (the grade separator) or collide with a grade token.
+    /// Client-facing id — the `{group}-{grade}` prefix clients send.
+    /// Must not collide with a grade token.
     pub id: String,
     /// Membership form 1: every model in this pool, at its configured
     /// grade. Mutually independent of `members` — both may be set.
@@ -757,10 +758,7 @@ impl Config {
                 return Err("group id must not be empty".into());
             }
             if g.id.contains(':') {
-                return Err(format!(
-                    "group id {:?}: ':' is reserved (id:grade selector)",
-                    g.id
-                ));
+                return Err(format!("group id {:?}: ':' is reserved", g.id));
             }
             if !seen_groups.insert(g.id.clone()) {
                 return Err(format!("duplicate group id {:?}", g.id));

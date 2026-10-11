@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::config::{default_config_path, home_dir, Config, ModelConfig};
+use crate::config::{default_config_path, home_dir, Config, KeyStore};
+use crate::registry::Registry;
 
 /// One model entry in a pi provider block.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -82,46 +83,41 @@ pub fn merge_models_doc(
 /// a single `arouter` provider whose models are the config's routing
 /// groups (the `[[groups]]` defaults or the user's own list). A client
 /// picks a group; arouter's routing strategy picks the upstream.
-pub fn group_entries(cfg: &Config) -> BTreeMap<String, Vec<PiModel>> {
+pub fn group_entries(cfg: &Config) -> Result<BTreeMap<String, Vec<PiModel>>> {
+    // resolve membership through the registry so group ladders, per-member
+    // overrides, and profile visibility match exactly what the daemon uses
+    let reg = Registry::from_config(cfg, &KeyStore::default())?;
     let mut models: Vec<PiModel> = Vec::new();
-    for g in cfg.effective_groups() {
-        // members visible on the default profile — profile-specific
-        // models stay behind their profile paths, not the group surface
-        let members: Vec<&ModelConfig> = cfg
-            .models
-            .iter()
-            .filter(|m| {
-                m.profiles.is_empty()
-                    && match g.pool.as_deref() {
-                        Some(p) => m.pool.iter().any(|mp| mp == p),
-                        None => g.members.iter().any(|mid| mid == &m.id),
-                    }
-            })
-            .collect();
-        let ctx_max = members.iter().filter_map(|m| m.context).max();
-        let reasoning = members
-            .iter()
-            .any(|m| matches!(m.grade.as_str(), "A+" | "A"))
-            .then_some(true);
-        models.push(PiModel {
-            id: g.id.clone(),
-            name: g.id.clone(),
-            context_window: ctx_max,
-            max_tokens: group_max_tokens(g.pool.as_deref()),
-            reasoning,
-        });
+    for g in &reg.groups {
+        for (tok, ctx) in reg.group_grades("default", g) {
+            models.push(PiModel {
+                id: format!("{}-{}", g.id, tok),
+                name: format!("{}-{}", g.id, tok),
+                context_window: ctx,
+                max_tokens: default_max_tokens(&tok, g.pool.as_deref().unwrap_or("quota")),
+                reasoning: default_reasoning(&tok),
+            });
+        }
     }
     let mut out = BTreeMap::new();
     out.insert("arouter".to_string(), models);
-    out
+    Ok(out)
 }
 
-/// pi's `maxTokens` is the output limit it may request; groups span the
-/// whole ladder so use the pool's largest sane cap.
-fn group_max_tokens(pool: Option<&str>) -> u32 {
-    match pool {
-        Some("local") => 32768,
-        _ => 65536,
+fn default_max_tokens(grade: &str, pool: &str) -> u32 {
+    match (grade, pool) {
+        ("A+", "quota") | ("A", "quota") => 65536,
+        ("A+", "local") => 32768,
+        ("B", "local") => 16384,
+        (_, "quota") | (_, "ondemand") => 65536,
+        _ => 32768,
+    }
+}
+
+fn default_reasoning(grade: &str) -> Option<bool> {
+    match grade {
+        "A+" | "A" => Some(true),
+        _ => None,
     }
 }
 
@@ -191,7 +187,7 @@ pub fn run(
     // 2. merge pi models.json
     let cfg = Config::load(Some(&config))?;
     let pi_path = home.join(".pi/agent/models.json");
-    let entries = group_entries(&cfg);
+    let entries = group_entries(&cfg)?;
     let (models_json, bak) = {
         let existing = std::fs::read_to_string(&pi_path)
             .ok()
@@ -362,23 +358,27 @@ mod tests {
             &[],
         );
         cfg.models[0].context = Some(272000);
-        let entries = group_entries(&cfg);
+        let entries = group_entries(&cfg).unwrap();
         let ar = &entries["arouter"];
         assert_eq!(
             ar.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-            vec!["arouter-subscription", "arouter-local", "arouter-ondemand"]
+            vec![
+                "arouter-subscription-A+",
+                "arouter-subscription-A",
+                "arouter-local-B",
+                "arouter-ondemand-A"
+            ]
         );
-        // contextWindow = max over the group's visible members
+        // per-grade context = max over the group's members at that grade
         assert_eq!(ar[0].context_window, Some(272000));
         assert_eq!(ar[1].context_window, None);
-        // reasoning follows the top grades present in each group
-        assert_eq!(ar[0].reasoning, Some(true)); // quota has A+
-        assert_eq!(ar[1].reasoning, None); // local is B only
-        assert_eq!(ar[2].reasoning, Some(true)); // ondemand has A
-                                                 // maxTokens: local gets the smaller local cap
+        // reasoning follows the grade token
+        assert_eq!(ar[0].reasoning, Some(true)); // A+
+        assert_eq!(ar[2].reasoning, None); // B
+                                           // maxTokens: quota/ondemand vs local-B caps
         assert_eq!(ar[0].max_tokens, 65536);
-        assert_eq!(ar[1].max_tokens, 32768);
-        assert_eq!(ar[2].max_tokens, 65536);
+        assert_eq!(ar[2].max_tokens, 16384);
+        assert_eq!(ar[3].max_tokens, 65536);
     }
 
     #[test]
@@ -392,17 +392,17 @@ mod tests {
             ladder: vec![],
             fallback: vec![],
         }];
-        let entries = group_entries(&cfg);
+        let entries = group_entries(&cfg).unwrap();
         let ar = &entries["arouter"];
         assert_eq!(ar.len(), 1, "user-defined groups replace the defaults");
-        assert_eq!(ar[0].id, "arouter-team");
-        assert_eq!(ar[0].max_tokens, 65536); // member-form → no local cap
+        assert_eq!(ar[0].id, "arouter-team-A");
+        assert_eq!(ar[0].max_tokens, 65536); // member-form → quota cap
     }
 
     #[test]
     fn profile_exclusive_models_stay_out_of_groups() {
         // a profile-only quota model must not leak into the default
-        // arouter-subscription group's metadata
+        // arouter-subscription group's listing or metadata
         let mut cfg = cfg_with(&[("B", "quota")], &["night"]);
         cfg.models.push(crate::config::ModelConfig {
             id: "x/A-only-night".into(),
@@ -413,10 +413,14 @@ mod tests {
             base_url: "http://127.0.0.1:9/v1".into(),
             ..Default::default()
         });
-        let entries = group_entries(&cfg);
+        let entries = group_entries(&cfg).unwrap();
         let ar = &entries["arouter"];
-        let sub = ar.iter().find(|m| m.id == "arouter-subscription").unwrap();
-        assert_eq!(sub.context_window, None, "profile-only context excluded");
+        assert_eq!(
+            ar.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["arouter-subscription-B"],
+            "profile-only models stay off the default group surface"
+        );
+        assert_eq!(ar[0].context_window, None);
     }
 
     #[test]
@@ -454,7 +458,7 @@ mod tests {
         let cfg = cfg_with(&[("A+", "quota")], &[]);
         let mut cfg = cfg;
         cfg.models[0].context = Some(131072);
-        let entries = group_entries(&cfg);
+        let entries = group_entries(&cfg).unwrap();
         let doc = merge_models_doc(
             serde_json::json!({"providers": {}}),
             entries,
