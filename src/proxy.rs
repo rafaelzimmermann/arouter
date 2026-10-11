@@ -544,6 +544,23 @@ async fn handle_chat(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    // review F3: ASK for usage on streams — many upstreams omit token
+    // counts from SSE unless stream_options.include_usage is set, and
+    // missing usage silently became zero spend.
+    if is_stream {
+        match payload
+            .get_mut("stream_options")
+            .and_then(|v| v.as_object_mut())
+        {
+            Some(o) => {
+                o.insert("include_usage".into(), serde_json::Value::Bool(true));
+            }
+            None => {
+                payload["stream_options"] = serde_json::json!({ "include_usage": true });
+            }
+        }
+    }
+
     // E3/E4: quota + context + budget aware candidate set
     // (routing.md §1/§3). `pre` keeps every health-ok candidate (even
     // quota-exhausted) so the 429 can quote a reset-aware Retry-After.
@@ -739,34 +756,52 @@ async fn try_candidates(
         // review F5: bound candidates per request (documented top-3)
         .take(st.cfg.timeouts.max_attempts.max(1))
     {
+        // Settled into relay_success / TapStream on success; dropped
+        // (hold released) when this candidate fails (review F2).
+        let mut reserve: Option<budget::ReserveGuard> = None;
         // E4: on-demand spend guards before every chargeable attempt.
         if pool == "ondemand" {
-            let est_usd = quota::est_cost(m, est);
-            if let Err(d) = budget::preflight(&st.usage, &st.cfg, profile, caller, est_usd) {
-                tracing::info!(
+            // review F3: unknown price must not pass as "free" — a
+            // candidate with no cost metadata cannot enter the paid pool
+            if m.cost_in <= 0.0 && m.cost_out <= 0.0 {
+                tracing::warn!(
                     model = m.id,
-                    layer = d.layer,
-                    window = d.window,
-                    "budget preflight skip (est ${:.4}, spent ${:.4}, cap ${:.4})",
-                    d.est,
-                    d.spent,
-                    d.cap
+                    "unpriced model in ondemand pool; refusing (set cost_in/cost_out)"
                 );
-                // keep the FIRST (cheapest-candidate) denial: it names the
-                // guard that stopped the model the caller would have gotten
-                // — later, pricier candidates' denials are less actionable
-                if err.denial.is_none() {
-                    err.denial = Some(d);
-                }
-                err.last_error = format!(
-                    "{}: budget {} {}",
-                    m.id,
-                    err.denial.as_ref().unwrap().layer,
-                    err.denial.as_ref().unwrap().window
-                );
+                err.last_error = format!("{}: unpriced models cannot enter the paid pool", m.id);
                 err.attempts += 1;
                 err.denials += 1;
                 continue;
+            }
+            let est_usd = quota::est_cost(m, est);
+            match budget::admit(&st.usage, &st.cfg, profile, caller, est_usd) {
+                Ok(g) => reserve = Some(g),
+                Err(d) => {
+                    tracing::info!(
+                        model = m.id,
+                        layer = d.layer,
+                        window = d.window,
+                        "budget preflight skip (est ${:.4}, spent ${:.4}, cap ${:.4})",
+                        d.est,
+                        d.spent,
+                        d.cap
+                    );
+                    // keep the FIRST (cheapest-candidate) denial: it names the
+                    // guard that stopped the model the caller would have gotten
+                    // — later, pricier candidates' denials are less actionable
+                    if err.denial.is_none() {
+                        err.denial = Some(d);
+                    }
+                    err.last_error = format!(
+                        "{}: budget {} {}",
+                        m.id,
+                        err.denial.as_ref().unwrap().layer,
+                        err.denial.as_ref().unwrap().window
+                    );
+                    err.attempts += 1;
+                    err.denials += 1;
+                    continue;
+                }
             }
         }
         payload["model"] = serde_json::Value::String(m.upstream_name.clone());
@@ -886,6 +921,7 @@ async fn try_candidates(
                         est,
                         cross_from,
                         wire,
+                        reserve,
                     )
                     .await);
                 }
@@ -905,6 +941,7 @@ async fn try_candidates(
                     est,
                     cross_from,
                     wire,
+                    reserve,
                 )
                 .await);
             }
@@ -1088,6 +1125,7 @@ async fn relay_success(
     est: &quota::RequestEstimate,
     cross_from: Option<&str>,
     wire: Wire,
+    reserve: Option<budget::ReserveGuard>,
 ) -> Response {
     let reg = st.reg();
     let served = reg.ladder.token(m.grade_rank);
@@ -1180,6 +1218,7 @@ async fn relay_success(
             st.metrics.clone(),
             st.health.clone(),
             t0,
+            reserve,
         );
         if wire == Wire::Anthropic {
             // re-emit as anthropic SSE; insert() replaces the upstream
@@ -1199,6 +1238,11 @@ async fn relay_success(
         // try_candidates — stalls/truncations already failed over there.
         let (_, bytes) = buffered.expect("buffered relay");
         let (tin, tout) = extract_usage(&bytes);
+        // F2: the actual record replaces the estimate hold first —
+        // settle-then-record keeps spend from double-counting
+        if let Some(g) = reserve {
+            g.settle();
+        }
         let rec = rec_meta(tin, tout, None, t0.elapsed().as_millis() as u64);
         if pool == "ondemand" {
             builder = builder.header(hdr::COST, format!("{:.6}", rec.cost_usd));
@@ -1329,6 +1373,9 @@ pub struct TapStream {
     metrics: Arc<Metrics>,
     health: Arc<Health>,
     t0: Instant,
+    /// Budget hold for this stream (ondemand only) — settled with the
+    /// actual usage in `finish`, released by Drop if never finished.
+    reserve: Option<budget::ReserveGuard>,
     first_byte: Option<Instant>,
     recorded: bool,
 }
@@ -1341,6 +1388,7 @@ impl TapStream {
         metrics: Arc<Metrics>,
         health: Arc<Health>,
         t0: Instant,
+        reserve: Option<budget::ReserveGuard>,
     ) -> Self {
         Self {
             inner: Box::pin(inner),
@@ -1350,6 +1398,7 @@ impl TapStream {
             metrics,
             health,
             t0,
+            reserve,
             first_byte: None,
             recorded: false,
         }
@@ -1363,6 +1412,10 @@ impl TapStream {
     /// - "upstream_error": the upstream stream broke — health failure
     ///   (retryable), attempt recorded
     fn finish(&mut self, status: &str) {
+        // F2: actual usage replaces the estimate hold exactly once
+        if let Some(g) = self.reserve.take() {
+            g.settle();
+        }
         if self.recorded {
             return;
         }
@@ -1594,6 +1647,7 @@ mod tests {
                 metrics.clone(),
                 health.clone(),
                 Instant::now(),
+                None,
             );
             pin_mut!(tap);
             assert!(matches!(
@@ -1630,6 +1684,7 @@ mod tests {
                 metrics.clone(),
                 health.clone(),
                 Instant::now(),
+                None,
             );
             pin_mut!(tap);
             let out = tap.as_mut().poll_next(&mut std::task::Context::from_waker(

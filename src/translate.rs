@@ -36,6 +36,12 @@ pub fn anthropic_to_openai(v: &Value) -> Result<Value, String> {
             }
         }
     }
+    // review F3: streams must report usage — anthropic clients always
+    // expect token counts in message_delta, and without include_usage
+    // many upstreams never emit them
+    if obj.get("stream").and_then(|v| v.as_bool()) == Some(true) {
+        out.insert("stream_options".into(), json!({ "include_usage": true }));
+    }
     if let Some(stops) = obj.get("stop_sequences").and_then(Value::as_array) {
         let stops: Vec<&str> = stops.iter().filter_map(|s| s.as_str()).collect();
         if !stops.is_empty() {

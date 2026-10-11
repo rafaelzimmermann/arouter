@@ -20,7 +20,7 @@ If any of this sounds familiar:
 
 - **Spend subscriptions first** — every quota window (used %, reset time, burn pace) is tracked live; the healthiest key serves each request; leftover quota on a window that's about to reset is deliberately drained — use it or lose it.
 - **Park cheap work locally** — low grades land on warm local models (ollama, llama.cpp, strata): already-resident models are preferred, KV caches stay hot, busy engines are skipped.
-- **Guard the paid pool** — on-demand APIs serve only as an explicit, budget-capped fallback: daily / monthly / hourly-pace / per-request caps stack (tightest wins), ordering is cheapest-within-grade, and refusals are a `402` naming the exact layer and spend. No surprise bills, ever.
+- **Guard the paid pool** — on-demand APIs serve only as an explicit, budget-capped fallback: daily / monthly / hourly-pace / per-request caps stack (tightest wins), ordering is cheapest-within-grade, and refusals are a `402` naming the exact layer and spend. Admission is atomic — accepted estimates are *reserved* until the real cost lands, so concurrent requests can't oversubscribe a cap. No surprise bills, ever.
 - **Never hang on a stalled upstream** — response-header, body-read, and SSE chunk-gap deadlines (`[timeouts]`, defaults 60s/120s) cut a stuck upstream and fail over to the next candidate; attempts per request are capped (`max_attempts`, default 3).
 - **Attribute everything** — per-caller keys give you usage, spend and budgets per person or per agent.
 

@@ -71,12 +71,32 @@ pub struct CallerStats {
     pub last_ts_unix: Option<u64>,
 }
 
+/// An in-flight paid request's budget hold (review F2): admitted
+/// estimates count toward every spend window until settled by the
+/// actual record (or released on failure/cancellation), so concurrent
+/// requests cannot both spend the same remaining dollar.
+pub struct Reservation {
+    pub id: u64,
+    pub usd: f64,
+    pub ts_unix: u64,
+    pub expires_unix: u64,
+    pub pool: String,
+    pub profile: String,
+    pub caller: String,
+}
+
+/// How long a reservation survives without its request finishing
+/// (streams idle-die at `timeouts.idle_secs`; an hour is generous).
+pub const RESERVATION_TTL_SECS: u64 = 3600;
+
 struct Inner {
     file: Option<std::fs::File>,
     path: Option<PathBuf>,
     stats: BTreeMap<String, ModelStats>,
     callers: BTreeMap<String, CallerStats>,
     total: u64,
+    reservations: Vec<Reservation>,
+    next_res_id: u64,
     /// Raw records retained for time-windowed budget queries (E4).
     /// Bounded to [`RETENTION_SECS`]; the JSONL file keeps the full audit
     /// trail.
@@ -165,6 +185,8 @@ impl UsageLog {
                 stats: BTreeMap::new(),
                 callers: BTreeMap::new(),
                 total: 0,
+                reservations: Vec::new(),
+                next_res_id: 0,
                 ring,
                 hour_cache: None,
             }),
@@ -180,6 +202,8 @@ impl UsageLog {
                 stats: BTreeMap::new(),
                 callers: BTreeMap::new(),
                 total: 0,
+                reservations: Vec::new(),
+                next_res_id: 0,
                 ring: std::collections::VecDeque::new(),
                 hour_cache: None,
             }),
@@ -291,8 +315,12 @@ impl UsageLog {
         caller: Option<&str>,
         since_unix: u64,
     ) -> f64 {
-        let inner = self.inner.lock().unwrap();
-        inner
+        let now = unix_now();
+        let mut inner = self.inner.lock().unwrap();
+        // F2: expired holds are gone — a crashed request can't block
+        // budgets forever
+        inner.reservations.retain(|r| r.expires_unix > now);
+        let ring = inner
             .ring
             .iter()
             .filter(|r| r.ts_unix >= since_unix)
@@ -301,7 +329,88 @@ impl UsageLog {
             .filter(|r| caller.is_none_or(|c| r.caller == c))
             .filter(|r| r.cost_usd > 0.0)
             .map(|r| r.cost_usd)
-            .sum()
+            .sum::<f64>();
+        let held = inner
+            .reservations
+            .iter()
+            .filter(|r| r.pool == pool)
+            .filter(|r| profile.is_none_or(|p| r.profile == p))
+            .filter(|r| caller.is_none_or(|c| r.caller == c))
+            .map(|r| r.usd)
+            .sum::<f64>();
+        ring + held
+    }
+
+    /// Atomic admission (review F2): `decide` inspects spend through the
+    /// locked [`ScopeSpend`] view (records + reservations, one lock); on
+    /// Ok(usd) a matching reservation is placed and its id returned.
+    pub fn admit<F>(
+        &self,
+        profile: &str,
+        caller: &str,
+        ttl_secs: u64,
+        decide: F,
+    ) -> Result<u64, crate::budget::Denial>
+    where
+        F: FnOnce(&ScopeSpend<'_>) -> Result<f64, crate::budget::Denial>,
+    {
+        let now = unix_now();
+        let mut inner = self.inner.lock().unwrap();
+        inner.reservations.retain(|r| r.expires_unix > now);
+        let view = ScopeSpend { inner: &inner };
+        let usd = decide(&view)?;
+        inner.next_res_id += 1;
+        let id = inner.next_res_id;
+        inner.reservations.push(Reservation {
+            id,
+            usd,
+            ts_unix: now,
+            expires_unix: now + ttl_secs,
+            pool: "ondemand".into(),
+            profile: profile.into(),
+            caller: caller.into(),
+        });
+        Ok(id)
+    }
+
+    /// Remove a reservation (settle with the actual record, or release
+    /// on failure). Idempotent.
+    pub fn release_reservation(&self, id: u64) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.reservations.retain(|r| r.id != id);
+    }
+}
+
+/// Locked-scope spend view handed to `admit`'s decider — computed from
+/// the ring AND live reservations, under one lock.
+pub struct ScopeSpend<'a> {
+    inner: &'a Inner,
+}
+
+impl ScopeSpend<'_> {
+    pub fn spend_since(&self, profile: Option<&str>, caller: Option<&str>, since_unix: u64) -> f64 {
+        let now = unix_now();
+        let ring = self
+            .inner
+            .ring
+            .iter()
+            .filter(|r| r.ts_unix >= since_unix)
+            .filter(|r| r.pool == "ondemand")
+            .filter(|r| profile.is_none_or(|p| r.profile == p))
+            .filter(|r| caller.is_none_or(|c| r.caller == c))
+            .filter(|r| r.cost_usd > 0.0)
+            .map(|r| r.cost_usd)
+            .sum::<f64>();
+        let held = self
+            .inner
+            .reservations
+            .iter()
+            .filter(|r| r.expires_unix > now)
+            .filter(|r| profile.is_none_or(|p| r.profile == p))
+            .filter(|r| caller.is_none_or(|c| r.caller == c))
+            .map(|r| r.usd)
+            .sum::<f64>();
+        ring + held
     }
 }
 

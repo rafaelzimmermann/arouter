@@ -55,6 +55,30 @@ pub fn preflight(
     caller: &CallerIdentity,
     est_usd: f64,
 ) -> Result<(), Denial> {
+    // read-only path (headers, diagnostics): no reservation placed.
+    // Admission is `admit()` — check + hold under one lock (review F2).
+    check_all(
+        |p, c, since| usage.spend_since("ondemand", p, c, since),
+        cfg,
+        profile,
+        caller,
+        est_usd,
+    )
+}
+
+/// Every stacked layer, evaluated against a `spend(profile, caller,
+/// since)` source. Shared by the racy read path (`preflight`) and the
+/// atomic admission path (`admit`) so the two can never drift.
+fn check_all<S>(
+    spend: S,
+    cfg: &Config,
+    profile: &str,
+    caller: &CallerIdentity,
+    est_usd: f64,
+) -> Result<(), Denial>
+where
+    S: Fn(Option<&str>, Option<&str>, u64) -> f64,
+{
     let pool_b = cfg.pool.get("ondemand").and_then(|p| p.budget.as_ref());
     let prof_b = cfg.profiles.get(profile).and_then(|p| p.budget.as_ref());
     let caller_b = cfg
@@ -80,15 +104,15 @@ pub fn preflight(
 
     // pool layer
     if let Some(b) = pool_b {
-        check(usage, b, None, None, now, est_usd, "pool")?;
+        check_layer(&spend, b, None, None, now, est_usd, "pool")?;
     }
     // profile layer (spend within this profile)
     if let Some(b) = prof_b {
-        check(usage, b, Some(profile), None, now, est_usd, "profile")?;
+        check_layer(&spend, b, Some(profile), None, now, est_usd, "profile")?;
     }
     // caller layer (spend by this caller, any profile)
     if let Some(day) = caller_b.filter(|d| *d > 0.0) {
-        let spent = usage.spend_since("ondemand", None, Some(&caller.name), day_start(now));
+        let spent = spend(None, Some(&caller.name), day_start(now));
         if spent + est_usd > day {
             return Err(Denial {
                 layer: "caller",
@@ -102,17 +126,89 @@ pub fn preflight(
     Ok(())
 }
 
-fn check(
-    usage: &UsageLog,
+/// Atomic admission (review F2): every layer is checked and the est is
+/// RESERVED in the same lock, so two concurrent $0.75 requests against
+/// a $1 cap cannot both pass. The returned guard releases the hold on
+/// drop (failure/cancellation) — call `settle()` when the actual cost
+/// lands in the usage log.
+pub fn admit(
+    usage: &std::sync::Arc<UsageLog>,
+    cfg: &Config,
+    profile: &str,
+    caller: &CallerIdentity,
+    est_usd: f64,
+) -> Result<ReserveGuard, Denial> {
+    let id = usage
+        .admit(
+            profile,
+            &caller.name,
+            crate::usage::RESERVATION_TTL_SECS,
+            |scope| {
+                check_all(
+                    |p, c, since| scope.spend_since(p, c, since),
+                    cfg,
+                    profile,
+                    caller,
+                    est_usd,
+                )
+                .map(|()| est_usd)
+            },
+        )?;
+    Ok(ReserveGuard {
+        usage: usage.clone(),
+        id,
+        settled: std::sync::atomic::AtomicBool::new(false),
+    })
+}
+
+/// RAII budget hold. Dropping releases it (request failed, was
+/// cancelled, or never happened); `settle()` releases it when the
+/// actual usage record replaces the estimate.
+impl std::fmt::Debug for ReserveGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // id-only: the hold itself has no interesting state
+        f.debug_struct("ReserveGuard")
+            .field("id", &self.id)
+            .finish()
+    }
+}
+
+pub struct ReserveGuard {
+    usage: std::sync::Arc<UsageLog>,
+    id: u64,
+    settled: std::sync::atomic::AtomicBool,
+}
+
+impl ReserveGuard {
+    pub fn settle(self) {
+        self.settled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.usage.release_reservation(self.id);
+    }
+}
+
+impl Drop for ReserveGuard {
+    fn drop(&mut self) {
+        if !self.settled.load(std::sync::atomic::Ordering::SeqCst) {
+            self.usage.release_reservation(self.id);
+        }
+    }
+}
+
+fn check_layer<S>(
+    spend: S,
     b: &BudgetConfig,
     profile: Option<&str>,
     _caller: Option<&str>,
     now: u64,
     est: f64,
     layer: &'static str,
-) -> Result<(), Denial> {
+) -> Result<(), Denial>
+where
+    S: Fn(Option<&str>, Option<&str>, u64) -> f64,
+{
     if b.daily_usd > 0.0 {
-        let spent = usage.spend_since("ondemand", profile, None, day_start(now));
+        let spent = spend(profile, None, day_start(now));
         if spent + est > b.daily_usd {
             return Err(Denial {
                 layer,
@@ -124,7 +220,7 @@ fn check(
         }
     }
     if b.monthly_usd > 0.0 {
-        let spent = usage.spend_since("ondemand", profile, None, month_start(now));
+        let spent = spend(profile, None, month_start(now));
         if spent + est > b.monthly_usd {
             return Err(Denial {
                 layer,
@@ -136,7 +232,7 @@ fn check(
         }
     }
     if b.pace_hourly_usd > 0.0 {
-        let spent = usage.spend_since("ondemand", profile, None, hour_start(now));
+        let spent = spend(profile, None, hour_start(now));
         if spent + est > b.pace_hourly_usd {
             return Err(Denial {
                 layer,
@@ -243,6 +339,83 @@ mod tests {
             name: "alice".into(),
             project: None,
         }
+    }
+
+    #[test]
+    fn admits_reserve_atomically_against_the_cap() {
+        // review F2's reproduced case: two $0.75 estimates against a $1
+        // daily cap. check + hold under one lock — the second is denied.
+        let usage = std::sync::Arc::new(UsageLog::in_memory());
+        let cfg = cfg_with(
+            BudgetConfig {
+                daily_usd: 1.0,
+                ..BudgetConfig::default()
+            },
+            None,
+        );
+        let g1 = admit(&usage, &cfg, "default", &alice(), 0.75).unwrap();
+        let e2 = admit(&usage, &cfg, "default", &alice(), 0.75).unwrap_err();
+        assert_eq!(e2.layer, "pool");
+        assert_eq!(e2.window, "daily");
+        // the hold alone (no records yet) is what denied it
+        assert!((e2.spent - 0.75).abs() < 1e-9);
+        drop(g1);
+    }
+
+    #[test]
+    fn dropped_guard_releases_the_hold() {
+        let usage = std::sync::Arc::new(UsageLog::in_memory());
+        let cfg = cfg_with(
+            BudgetConfig {
+                daily_usd: 1.0,
+                ..BudgetConfig::default()
+            },
+            None,
+        );
+        {
+            let _g = admit(&usage, &cfg, "default", &alice(), 0.75).unwrap();
+            assert!(admit(&usage, &cfg, "default", &alice(), 0.75).is_err());
+        } // failed attempt: guard dropped, hold released
+        let g2 = admit(&usage, &cfg, "default", &alice(), 0.75).unwrap();
+        g2.settle();
+    }
+
+    #[test]
+    fn settle_then_record_does_not_double_count() {
+        let usage = std::sync::Arc::new(UsageLog::in_memory());
+        let cfg = cfg_with(
+            BudgetConfig {
+                daily_usd: 1.0,
+                ..BudgetConfig::default()
+            },
+            None,
+        );
+        let g = admit(&usage, &cfg, "default", &alice(), 0.75).unwrap();
+        // estimate held
+        assert!((usage.spend_since("ondemand", None, None, 0) - 0.75).abs() < 1e-9);
+        // request finished: actual cost replaces the hold
+        g.settle();
+        usage.record(rec(0.60, unix_now(), "alice", "default"));
+        assert!((usage.spend_since("ondemand", None, None, 0) - 0.60).abs() < 1e-9);
+        assert!(admit(&usage, &cfg, "default", &alice(), 0.30).is_ok());
+    }
+
+    #[test]
+    fn expired_reservation_stops_counting() {
+        let usage = std::sync::Arc::new(UsageLog::in_memory());
+        let cfg = cfg_with(
+            BudgetConfig {
+                daily_usd: 1.0,
+                ..BudgetConfig::default()
+            },
+            None,
+        );
+        // ttl 0: expires immediately — a crashed request can't block
+        // budgets forever (usage::admit takes the ttl directly)
+        let id = usage.admit("default", "alice", 0, |_| Ok(0.75)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert!(admit(&usage, &cfg, "default", &alice(), 0.75).is_ok());
+        usage.release_reservation(id);
     }
 
     #[test]

@@ -247,15 +247,33 @@ pub fn merge_discovered(
             tracing::debug!(model = d.id, "discovered model ungradeable, skipping");
             continue;
         }
+        // review F3: unknown price must never silently become "free" in
+        // the paid pool — strip ondemand from unpriced discoveries
+        // (quota/local pools don't charge, so they stay admissible)
+        let mut pools = if d.pools.is_empty() {
+            vec!["quota".to_string()]
+        } else {
+            d.pools.clone()
+        };
+        if d.price.is_none() && pools.iter().any(|p| p == "ondemand") {
+            tracing::warn!(
+                model = d.id,
+                "discovered without price metadata; refusing ondemand admission (set cost_in/cost_out to admit it)"
+            );
+            pools.retain(|p| p != "ondemand");
+        }
+        if pools.is_empty() {
+            tracing::debug!(
+                model = d.id,
+                "unpriced discovery has no pool left; skipping"
+            );
+            continue;
+        }
         merged.models.push(ModelConfig {
             id: d.id.clone(),
             name: Some(d.name.clone()),
             grade,
-            pool: if d.pools.is_empty() {
-                vec!["quota".to_string()]
-            } else {
-                d.pools.clone()
-            },
+            pool: pools,
             context: d.context,
             base_url: d.base_url.clone(),
             auth: d.auth.clone(),

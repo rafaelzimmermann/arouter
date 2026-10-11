@@ -16,7 +16,7 @@ use arouter::registry::Registry;
 use arouter::usage::UsageLog;
 use axum::body::Body;
 use axum::http::{header, HeaderMap, HeaderName, Request, StatusCode};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::Router;
 use http_body_util::BodyExt;
@@ -1160,6 +1160,85 @@ async fn per_caller_budget_denies_even_when_pool_allows() {
     h.insert("authorization", "Bearer alice-key".parse().unwrap());
     let resp = post_chat(&t.app, "/ondemand/v1/chat/completions", "A", false, h).await;
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn streams_ask_for_usage_and_get_it() {
+    // review F3: without stream_options.include_usage many upstreams
+    // finish a paid stream without ever reporting tokens — arouter now
+    // asks, and the usage lands in the spend record.
+    let up = spawn_upstream(Router::new().route(
+        "/v1/chat/completions",
+        post(|body: String| async move {
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            if v["stream_options"]["include_usage"] != serde_json::Value::Bool(true) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "upstream requires stream_options.include_usage",
+                )
+                    .into_response();
+            }
+            let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\n\
+data: [DONE]\n\n";
+            ([(header::CONTENT_TYPE, "text/event-stream")], sse).into_response()
+        }),
+    ))
+    .await;
+    let mut cfg = Config::default();
+    cfg.models = vec![model("or/usage", "A", &["quota"], &up, 1.0, (1.0, 4.0))];
+    let t = test_app(cfg);
+
+    // stream:true on the wire (the client asked) — body reaches the
+    // upstream with include_usage, usage chunk comes back
+    let resp = post_chat(&t.app, "/v1/chat/completions", "A", true, HeaderMap::new()).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "upstream 400s without include_usage"
+    );
+    drop(resp.into_body().collect().await.unwrap());
+    let records = t.usage.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        (records[0].tokens_in, records[0].tokens_out),
+        (Some(10), Some(5))
+    );
+    assert!(records[0].cost_usd > 0.0, "usage must spend");
+}
+
+#[tokio::test]
+async fn unpriced_model_is_refused_in_the_paid_pool() {
+    // review F3: a model with no price metadata must not enter the paid
+    // pool as "free" — fail closed instead of silently spending
+    let up = good_json().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![model(
+        "or/mystery",
+        "A",
+        &["ondemand"],
+        &up,
+        1.0,
+        (0.0, 0.0),
+    )];
+    let t = test_app(cfg);
+
+    let resp = post_chat(
+        &t.app,
+        "/ondemand/v1/chat/completions",
+        "A",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body = body_string(resp).await;
+    assert!(
+        body.contains("unpriced"),
+        "denial must name the cause: {body}"
+    );
+    // nothing was served, nothing recorded
+    assert_eq!(t.usage.records().len(), 0);
 }
 
 /// 200 headers, then the body dies mid-flight (review F4 e2e).
