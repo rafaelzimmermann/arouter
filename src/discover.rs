@@ -166,6 +166,17 @@ async fn fetch_names(
 /// One row of a `/models` listing: (name, context, $/Mtok (in, out)).
 type RawModel = (String, Option<u64>, Option<(f64, f64)>);
 
+/// Variant suffixes an OpenAI-compatible `/v1/models` listing may carry
+/// that cannot serve `POST /v1/chat/completions`. OpenRouter's `:batch`
+/// routes belong to its Batch API and 404 on the chat endpoint
+/// (`cannot be used with the chat/completions endpoint`); arouter only
+/// speaks chat, so they must never become candidates. Everything else
+/// OpenRouter offers (`:free`, `:nitro`, `:floor`, `:online`,
+/// `:thinking`, `:extended`) is a plain chat route and is kept.
+fn non_chat_variant(id: &str) -> bool {
+    id.ends_with(":batch")
+}
+
 /// Parse `/v1/models` (OpenAI/OpenRouter shape) or `/api/tags` (ollama).
 fn parse_names(json: &serde_json::Value, ollama_shape: bool) -> Vec<RawModel> {
     let mut out = Vec::new();
@@ -188,6 +199,9 @@ fn parse_names(json: &serde_json::Value, ollama_shape: bool) -> Vec<RawModel> {
                 let Some(id) = m.get("id").and_then(|v| v.as_str()) else {
                     continue;
                 };
+                if non_chat_variant(id) {
+                    continue;
+                }
                 let ctx = m
                     .get("context_length")
                     .or_else(|| m.get("context_window"))
@@ -452,6 +466,34 @@ mod tests {
             vec![("qwen3:14b".into(), None, None)]
         );
         assert!(parse_names(&serde_json::json!({}), false).is_empty());
+    }
+
+    #[test]
+    fn batch_variants_are_not_candidates() {
+        // review: OpenRouter lists `:batch` routes that 404 on
+        // chat/completions — never let them reach the registry
+        let or = serde_json::json!({
+            "data": [
+                {"id": "openai/gpt-6-luna-pro:batch"},
+                {"id": "openai/gpt-6-luna-pro"},
+                {"id": "x/free:free"},
+                {"id": "x/turbo:nitro"},
+                {"id": "x/tools:exacto"},
+            ]
+        });
+        let names: Vec<String> = parse_names(&or, false)
+            .into_iter()
+            .map(|(n, _, _)| n)
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "openai/gpt-6-luna-pro",
+                "x/free:free",
+                "x/turbo:nitro",
+                "x/tools:exacto",
+            ]
+        );
     }
 
     #[test]

@@ -1076,14 +1076,17 @@ async fn try_candidates(
                     &msg,
                     t0.elapsed().as_millis() as u64,
                 );
-                if retryable(code) {
-                    tracing::warn!(model = m.id, "retryable failure: {msg}");
-                    st.health.record_failure(&m.id, true);
+                st.health.record_failure(&m.id, retryable(code));
+                if failover(code) {
+                    tracing::warn!(
+                        model = m.id,
+                        permanent = !retryable(code),
+                        "failing over: {msg}"
+                    );
                     err.last_error = format!("{}: {msg}", m.id);
                     err.attempts += 1;
                     continue;
                 }
-                st.health.record_failure(&m.id, false);
                 return Ok(wire_error(
                     wire,
                     code,
@@ -1154,6 +1157,15 @@ fn budget_error(d: &budget::Denial, profile: &str, requested: &str, wire: Wire) 
 
 fn retryable(code: u16) -> bool {
     matches!(code, 402 | 408 | 429) || code >= 500
+}
+
+/// Should the router move on to the next candidate? Transient faults get
+/// an exponential cooldown on top; a 404 is permanent *for that model*
+/// (route or model absent upstream — e.g. an OpenRouter `:batch` variant
+/// asked for on chat/completions), so it fails over without cooling down
+/// and still counts toward the circuit breaker.
+fn failover(code: u16) -> bool {
+    retryable(code) || code == 404
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -2279,6 +2291,11 @@ mod tests {
         assert!(!retryable(400));
         assert!(!retryable(401));
         assert!(!retryable(404));
+        // 404 fails over without a cooldown (permanent, model-specific)
+        assert!(failover(404));
+        assert!(failover(429));
+        assert!(!failover(400));
+        assert!(!failover(401));
     }
 
     #[test]

@@ -100,6 +100,21 @@ async fn bad_500() -> String {
     .await
 }
 
+/// An upstream that 404s the model: OpenRouter's reply for a `:batch`
+/// variant asked on the chat endpoint.
+async fn bad_404() -> String {
+    spawn_upstream(Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            (
+                StatusCode::NOT_FOUND,
+                r#"{"error":{"message":"openai/gpt-6-luna-pro:batch cannot be used with the chat/completions endpoint","code":404}}"#,
+            )
+        }),
+    ))
+    .await
+}
+
 // ─────────────────────────── harness ───────────────────────────
 
 fn model(
@@ -353,6 +368,79 @@ async fn failover_on_retryable_500() {
     let m = t.metrics.render();
     assert!(m.contains("status=\"upstream_error\""));
     assert!(m.contains("status=\"ok\""));
+}
+
+#[tokio::test]
+async fn failover_on_404_model_not_usable() {
+    // review: a 404 is permanent for that model but must not surface to
+    // the caller while another candidate can answer.
+    let bad = bad_404().await;
+    let good = good_json().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![
+        model(
+            "or/gpt-6-luna-pro:batch",
+            "A",
+            &["quota"],
+            &bad,
+            2.0,
+            (0.0, 0.0),
+        ),
+        model("zai/backup", "A", &["quota"], &good, 1.0, (0.0, 0.0)),
+    ];
+    let t = test_app(cfg);
+
+    let resp = post_chat(&t.app, "/v1/chat/completions", "A", false, HeaderMap::new()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(hstr(&resp, "x-arouter-upstream"), "zai/backup");
+    drop(resp.into_body().collect().await.unwrap());
+
+    let records = t.usage.records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].model, "or/gpt-6-luna-pro:batch");
+    assert_eq!(records[0].status, "upstream_error");
+    assert_eq!(records[0].http_status, Some(404));
+    assert_eq!(records[1].status, "ok");
+
+    // permanent: no cooldown consumed for a 404
+    assert_eq!(
+        t.health.state("or/gpt-6-luna-pro:batch"),
+        HealthState::Healthy
+    );
+}
+
+#[tokio::test]
+async fn all_candidates_404_yields_upstream_error() {
+    let bad1 = bad_404().await;
+    let bad2 = bad_404().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![
+        model("or/a:batch", "A", &["quota"], &bad1, 2.0, (0.0, 0.0)),
+        model("or/b:batch", "A", &["quota"], &bad2, 1.0, (0.0, 0.0)),
+    ];
+    let t = test_app(cfg);
+
+    let resp = post_chat(&t.app, "/v1/chat/completions", "A", false, HeaderMap::new()).await;
+    // exhaustion is the existing contract: 429 with the last error in detail
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(body.contains("arouter_exhausted"), "body: {body}");
+    assert!(body.contains("or/b:batch"), "last attempt wins: {body}");
+    assert!(body.contains("404"), "detail keeps the status: {body}");
+
+    // both candidates were tried
+    let records = t.usage.records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].model, "or/a:batch");
+    assert_eq!(records[1].model, "or/b:batch");
 }
 
 #[tokio::test]
