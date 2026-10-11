@@ -136,6 +136,18 @@ fn mint(inner: &mut Inner, role: &str, now: u64, ttl: Duration) -> String {
     sid
 }
 
+/// Where the claim link points. The token is only consumable from
+/// loopback, so a wildcard bind must not advertise `0.0.0.0` — the
+/// operator needs a URL they can actually open.
+pub fn claim_url(bind: &str, token: &str) -> String {
+    let host = match bind.rsplit_once(':') {
+        Some((h, _)) if h == "0.0.0.0" || h == "[::]" || h == "::" => "127.0.0.1",
+        _ => bind.rsplit_once(':').map(|(h, _)| h).unwrap_or(bind),
+    };
+    let port = bind.rsplit_once(':').map(|(_, p)| p).unwrap_or("3929");
+    format!("http://{host}:{port}/claim/{token}")
+}
+
 fn random_token() -> String {
     let mut buf = [0u8; 32];
     getrandom::getrandom(&mut buf).expect("system randomness unavailable");
@@ -500,6 +512,26 @@ mod tests {
             Some("other:3929"),
             false
         ));
+    }
+
+    #[test]
+    fn claim_url_is_openable_not_a_wildcard() {
+        assert_eq!(
+            claim_url("0.0.0.0:3929", "abc"),
+            "http://127.0.0.1:3929/claim/abc"
+        );
+        assert_eq!(
+            claim_url("[::]:3929", "abc"),
+            "http://127.0.0.1:3929/claim/abc"
+        );
+        assert_eq!(
+            claim_url("127.0.0.1:3929", "abc"),
+            "http://127.0.0.1:3929/claim/abc"
+        );
+        assert_eq!(
+            claim_url("192.168.50.192:4000", "abc"),
+            "http://192.168.50.192:4000/claim/abc"
+        );
     }
 
     #[test]

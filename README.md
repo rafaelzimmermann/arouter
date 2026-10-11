@@ -79,6 +79,27 @@ key     = "env:AROUTER_KEY_ALICE"   # client sends: Authorization: Bearer <key>
 
 Per-caller usage, spend and caps fall out for free: `sum by (caller) (increase(arouter_cost_usd_total[1d]))` in Grafana is spend per person. arouter is plain HTTP — expose it only on trusted networks (LAN/tailnet); keys protect identity, not transport.
 
+## Web interface
+
+arouter serves a small web UI on the same port (`/`). There is no default
+password: at startup the daemon prints a claim link under the banner.
+
+```
+web: claim http://127.0.0.1:3929/claim/<token>
+```
+
+Open it on the machine running the daemon. The link is **single-use and
+loopback-only**; consuming it starts an admin session (`HttpOnly`,
+`SameSite=Strict` cookie, 12h by default). Reads are gated too — the JSON
+API under `/api/*` returns 401 without a session, and every write must be
+same-origin. Disable the whole surface with `[web] enabled = false`.
+
+```toml
+[web]
+enabled = true
+session_ttl_hours = 12
+```
+
 ## Anthropic-wire clients
 
 Claude Code and `anthropic-messages` clients use the same grades and pools:

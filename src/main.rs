@@ -380,7 +380,7 @@ async fn serve(
         if let Some(token) = web.claim_token() {
             // loopback-only, single-use — printed so the operator can
             // bootstrap an admin session without a default password
-            println!("web: claim http://{bind}/claim/{token}");
+            println!("web: claim {}", arouter::web::claim_url(&bind, &token));
         }
     }
     tracing::info!(
