@@ -1,0 +1,49 @@
+# Continuous integration (review rec. 1): locked build, formatting,
+# Clippy with warnings denied, unit/component tests — plus the black-box
+# Docker rig in an isolated lane (own compose project; GitHub-hosted
+# ubuntu runners ship docker + compose v2).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt · clippy · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Formatting
+        run: cargo fmt --check
+      - name: Clippy (warnings denied)
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Tests
+        run: cargo test --locked
+
+  rig:
+    name: docker integration rig
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the black-box rig
+        run: bash tests/integration/run.sh
+        env:
+          RIG_PROJECT: ci-${{ github.run_id }}-${{ github.run_attempt }}
+          # keep the stack up on failure so the next step can dump logs
+          KEEP: "1"
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose -p "ci-${{ github.run_id }}-${{ github.run_attempt }}" logs --tail 300 arouter
+      - name: Tear down
+        if: always()
+        run: docker compose -p "ci-${{ github.run_id }}-${{ github.run_attempt }}" down -v --remove-orphans

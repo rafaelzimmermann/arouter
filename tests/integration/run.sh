@@ -14,8 +14,14 @@ cd "$(dirname "$0")"
 # live observability stack on the same machine (review isolation)
 PROM_PORT="${RIG_PROM_PORT:-9090}"
 GRAF_PORT="${RIG_GRAF_PORT:-3300}"
+AITOP_PORT="${RIG_AITOP_PORT:-9100}"
+SA="${RIG_STUB_A_PORT:-9101}"; SB="${RIG_STUB_B_PORT:-9102}"
+SC="${RIG_STUB_C_PORT:-9103}"; SD="${RIG_STUB_D_PORT:-9104}"
+# project isolation (review: fixed project + `down -v` is destructive to
+# any other rig using it) — unique project ⇒ unique containers+volumes
+export COMPOSE_PROJECT_NAME="${RIG_PROJECT:-arouter-it}"
 
-BASE=http://localhost:3939
+BASE="http://localhost:${RIG_AROUTER_PORT:-3939}"
 ALICE="Authorization: Bearer it-alice-key"
 FRUGAL="Authorization: Bearer it-frugal-key"
 PASS=0; FAIL=0; FAILED=()
@@ -46,7 +52,7 @@ grafq() { # grafq <promql>: instant query through Grafana's datasource API
     | curl -sS -m 10 localhost:"$GRAF_PORT"/api/ds/query -H 'content-type: application/json' -d @-
 }
 mode() { curl -sS -m 10 -X POST "localhost:$2/__mode" -d "{\"mode\":\"$1\"}" >/dev/null; }
-aitop_mode() { curl -sS -m 10 -X POST localhost:9100/__mode -d "{\"mode\":\"$1\"}" >/dev/null; sleep 3; }
+aitop_mode() { curl -sS -m 10 -X POST "localhost:$AITOP_PORT/__mode" -d "{\"mode\":\"$1\"}" >/dev/null; sleep 3; }
 wait_window() { # wait_window <provider> <window> <pct>: poll until the window gauge reflects the fixture
   local prov=$1 win=$2 want=$3 v i
   for i in $(seq 1 20); do
@@ -70,12 +76,11 @@ wait_drain() { # wait_drain <provider> <-1|up>: poll /metrics until the drain ga
 }
 hits()  { curl -sS -m 10 "localhost:$1/__hits" | jq .hits; }
 reset_hits() { curl -sS -m 10 -X POST "localhost:$1/__reset_hits" >/dev/null; }
-all_ok() { mode ok 9101; mode ok 9102; mode ok 9103; mode ok 9104; }
+all_ok() { mode ok "$SA"; mode ok "$SB"; mode ok "$SC"; mode ok "$SD"; }
 fresh_arouter() {  # restart daemon: clears health cooldowns, refetches quota
   docker compose restart arouter >/dev/null; sleep 4
 }
 
-SA=9101; SB=9102; SC=9103; SD=9104
 
 # ── rig lifecycle ─────────────────────────────────────────────────────────
 cp arouter.toml.in arouter.toml         # pristine config (hot-reload test appends)

@@ -1,7 +1,9 @@
 # Black-box integration topology for arouter (tests/integration/).
 #   docker compose up -d --wait && tests/integration/run.sh
-# Host port map: arouter 3939 · stub-a..d admin 9101..9104 · aitop 9100
-name: arouter-it
+# Isolation: no fixed project name (run.sh sets COMPOSE_PROJECT_NAME,
+# default arouter-it) and every host port is parameterized — defaults
+# below reproduce the historical map: arouter 3939 · stub-a..d admin
+# 9101..9104 · aitop 9100 · prometheus 9090 · grafana 3300.
 
 x-stub: &stub
   build: ./stub
@@ -16,24 +18,24 @@ services:
   stub-a:
     <<: *stub
     environment: { MODEL: "alpha" }
-    ports: ["9101:9000"]
+    ports: ["${RIG_STUB_A_PORT:-9101}:9000"]
   stub-b:
     <<: *stub
     environment: { MODEL: "beta" }
-    ports: ["9102:9000"]
+    ports: ["${RIG_STUB_B_PORT:-9102}:9000"]
   stub-c:
     <<: *stub
     environment: { MODEL: "gamma" }
-    ports: ["9103:9000"]
+    ports: ["${RIG_STUB_C_PORT:-9103}:9000"]
   stub-d:
     <<: *stub
     environment: { MODEL: "any" }
-    ports: ["9104:9000"]
+    ports: ["${RIG_STUB_D_PORT:-9104}:9000"]
 
   aitop:
     build: ./aitop
     restart: unless-stopped
-    ports: ["9100:80"]
+    ports: ["${RIG_AITOP_PORT:-9100}:80"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:80/quotas.json', timeout=2)"]
       interval: 2s
@@ -47,7 +49,7 @@ services:
     command: ["serve", "--config", "/etc/arouter/arouter.toml"]
     volumes:
       - ./arouter.toml:/etc/arouter/arouter.toml:ro
-    ports: ["3939:3929"]
+    ports: ["${RIG_AROUTER_PORT:-3939}:3929"]
     depends_on:
       stub-a: { condition: service_healthy }
       stub-b: { condition: service_healthy }
