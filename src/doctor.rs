@@ -330,10 +330,38 @@ pub async fn run(config_path: Option<&Path>, bind_override: Option<&str>) -> Rep
                 overall = overall.merge(Level::Warn);
             }
         }
-        // systemd unit
+        // systemd unit — missing is said out loud, not omitted (review F1);
+        // activation state when systemctl is available
         let unit = home.join(".config/systemd/user/arouter.service");
         if unit.exists() {
-            lines.push((Level::Ok, "systemd user unit installed".into()));
+            let active = std::process::Command::new("systemctl")
+                .args(["--user", "is-active", "arouter"])
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default();
+            match active.as_str() {
+                "active" => lines.push((
+                    Level::Ok,
+                    "systemd user unit installed, service active".into(),
+                )),
+                "" => {
+                    lines.push((Level::Ok, "systemd user unit installed".into()));
+                }
+                state => {
+                    lines.push((
+                        Level::Warn,
+                        format!("systemd unit installed but service is {state} — systemctl --user start arouter"),
+                    ));
+                    overall = overall.merge(Level::Warn);
+                }
+            }
+        } else {
+            lines.push((
+                Level::Warn,
+                "systemd user unit NOT installed — run `arouter init` to create it".into(),
+            ));
+            overall = overall.merge(Level::Warn);
         }
     }
 

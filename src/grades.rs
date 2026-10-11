@@ -78,12 +78,17 @@ impl Ladder {
     /// Ranks allowed by the fallback policy for a requested ceiling:
     /// the configured allow list for that grade, defaulting to
     /// `[itself, one grade lower]` (docs/routing.md §2). Sorted ascending
-    /// (best first), always includes the ceiling.
+    /// (best first), always includes the ceiling. Never-upward is a hard
+    /// guarantee: even a configured allow list cannot add ranks ABOVE
+    /// the requested grade (review F10) — validation rejects them, this
+    /// filter enforces it.
     pub fn allow_ranks(&self, ceiling: usize, allow: Option<&Vec<String>>) -> Vec<usize> {
         let mut ranks: Vec<usize> = match allow {
-            Some(tokens) if !tokens.is_empty() => {
-                tokens.iter().filter_map(|t| self.rank(t)).collect()
-            }
+            Some(tokens) if !tokens.is_empty() => tokens
+                .iter()
+                .filter_map(|t| self.rank(t))
+                .filter(|&r| r >= ceiling)
+                .collect(),
             // default policy: [itself, one grade lower] (docs/routing.md §2)
             _ => {
                 let mut v = vec![ceiling];
@@ -231,6 +236,21 @@ mod tests {
         assert_eq!(l.effective_ranks(0, Some(&deep), None), vec![0, 1, 2]);
         // strict request wins over deeper default
         assert_eq!(l.effective_ranks(0, None, Some(0)), vec![0]);
+    }
+
+    #[test]
+    fn configured_allow_never_routes_upward() {
+        // review F10: [routing.fallback.allow] B = ["B", "A+"] must not
+        // hand a B request an A+ model — never-upward beats configuration
+        let l = Ladder::default(); // A+ < A < B < C by rank
+        let b = l.rank("B").unwrap();
+        let sneaky = vec!["B".to_string(), "A+".to_string()];
+        let ranks = l.allow_ranks(b, Some(&sneaky));
+        assert!(!ranks.contains(&l.rank("A+").unwrap()));
+        assert_eq!(ranks, vec![b]);
+        // and a fully-upward list still serves the ceiling itself
+        let all_up = vec!["A+".to_string()];
+        assert_eq!(l.allow_ranks(b, Some(&all_up)), vec![b]);
     }
 
     #[test]

@@ -45,7 +45,9 @@ if [[ $SKIP_INIT -eq 1 ]]; then
 fi
 
 say "running 'arouter init' (config, systemd user unit, pi integration)"
-if "$BIN" init; then
+# install.sh already placed the binary — init only seeds config/unit/pi
+# (a self-copy would fail ETXTBSY; review F1)
+if "$BIN" init --no-install-bin; then
   say "done. start with:  systemctl --user start arouter   then:  arouter monitor"
 else
   say "init declined or failed — run '$BIN init' manually when ready"

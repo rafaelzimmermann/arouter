@@ -280,24 +280,32 @@ pub fn run(
         (Some(pi_path), bak)
     };
 
-    // 3. binary → ~/.local/bin
+    // 3. binary → ~/.local/bin. Skip when arouter is already running FROM
+    // the destination (a self-copy fails with ETXTBSY and used to abort
+    // init before the systemd unit was written — review F1); upgrade in
+    // place via temp file + rename so a running binary is never written
+    // mid-flight.
     let mut bin_installed = None;
     let bin_path = home.join(".local/bin/arouter");
     if install_bin {
         if let Ok(exe) = std::env::current_exe() {
             std::fs::create_dir_all(bin_path.parent().unwrap())?;
-            std::fs::copy(&exe, &bin_path)
-                .with_context(|| format!("copy {} -> {}", exe.display(), bin_path.display()))?;
+            place_binary(&exe, &bin_path)
+                .with_context(|| format!("install {} -> {}", exe.display(), bin_path.display()))?;
             bin_installed = Some(bin_path.clone());
         }
     }
 
-    // 4. systemd user unit
+    // 4. systemd user unit — ExecStart points at the binary that is
+    // actually running (honors a custom install prefix; review F1)
     let unit = if install_unit {
         let unit_dir = home.join(".config/systemd/user");
         std::fs::create_dir_all(&unit_dir)?;
         let unit_path = unit_dir.join("arouter.service");
-        std::fs::write(&unit_path, systemd_unit(&bin_path, &config))
+        let exec = std::env::current_exe()
+            .ok()
+            .unwrap_or_else(|| bin_path.clone());
+        std::fs::write(&unit_path, systemd_unit(&exec, &config))
             .with_context(|| format!("write {}", unit_path.display()))?;
         let _ = std::process::Command::new("systemctl")
             .args(["--user", "daemon-reload"])
@@ -316,9 +324,69 @@ pub fn run(
     })
 }
 
+/// Install `src` as `dst`, safely: no-op when both name the same file
+/// (self-copy would hit ETXTBSY), otherwise copy to a sibling temp file
+/// and rename over the destination (atomic on the same filesystem, and
+/// a running binary keeps its inode). Returns true when bytes moved.
+pub fn place_binary(src: &Path, dst: &Path) -> Result<bool> {
+    if same_file(src, dst) {
+        return Ok(false);
+    }
+    let tmp = dst.with_extension("arouter.new");
+    std::fs::copy(src, &tmp)
+        .with_context(|| format!("copy {} -> {}", src.display(), tmp.display()))?;
+    std::fs::rename(&tmp, dst)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), dst.display()))?;
+    Ok(true)
+}
+
+/// Exact same-file test on unix: device + inode.
+fn same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn place_binary_is_a_noop_on_same_file() {
+        // the process-level contract from the review: installing the
+        // running executable onto itself must not fail with ETXTBSY
+        let exe = std::env::current_exe().unwrap();
+        assert!(!place_binary(&exe, &exe).unwrap(), "self-install no-op");
+    }
+
+    #[test]
+    fn place_binary_upgrades_via_rename() {
+        let dir = std::env::temp_dir().join(format!("arouter-init-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.bin");
+        let dst = dir.join("dst.bin");
+        std::fs::write(&src, b"new bytes").unwrap();
+        std::fs::write(&dst, b"old bytes").unwrap();
+        assert!(place_binary(&src, &dst).unwrap());
+        assert_eq!(std::fs::read(&dst).unwrap(), b"new bytes");
+        assert!(!dir.join("dst.arouter.new").exists(), "temp cleaned");
+        // same path → same file → no-op, never an error
+        assert!(!place_binary(&dst, &dst).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unit_honors_the_running_binary_path() {
+        // review F1: ExecStart must point at where arouter actually runs
+        // from (custom prefixes), not hardcode ~/.local/bin
+        let unit = systemd_unit(
+            Path::new("/opt/prefix/arouter"),
+            Path::new("/x/config.toml"),
+        );
+        assert!(unit.contains("ExecStart=/opt/prefix/arouter serve"));
+    }
 
     fn cfg_with(grades: &[(&str, &str)], profiles: &[&str]) -> Config {
         let mut models: Vec<crate::config::ModelConfig> = grades

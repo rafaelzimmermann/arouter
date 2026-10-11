@@ -82,12 +82,15 @@ impl Registry {
             let vis = p.models.clone().unwrap_or_default();
             let mut fallback = cfg.routing.fallback.clone();
             if let Some(pf) = &p.fallback {
-                // overlay: profile allow keys replace base per-key; cross_pool replaces
+                // overlay: profile allow keys replace base per-key; a
+                // cross_pool that is PRESENT replaces (Some([]) explicitly
+                // disables inherited paid fallback — empty ≠ unspecified,
+                // review F7), absent inherits the base
                 for (k, v) in &pf.allow {
                     fallback.allow.insert(k.clone(), v.clone());
                 }
-                if !pf.cross_pool.is_empty() {
-                    fallback.cross_pool = pf.cross_pool.clone();
+                if let Some(cp) = &pf.cross_pool {
+                    fallback.cross_pool = Some(cp.clone());
                 }
             }
             profiles.insert(
@@ -454,6 +457,39 @@ mod tests {
         assert_eq!(
             r.attempt_list("night", "quota", &req(&r.ladder, "A")).len(),
             2
+        );
+    }
+
+    #[test]
+    fn explicit_empty_cross_pool_disables_inherited_fallback() {
+        // review F7: a profile must be able to turn OFF paid fallback;
+        // `cross_pool = []` is PRESENT, not unspecified
+        let mut cfg = Config::default();
+        cfg.routing.fallback.cross_pool = Some(vec!["ondemand".into()]);
+        cfg.profiles.insert(
+            "strict".into(),
+            ProfileConfig {
+                fallback: Some(FallbackConfig {
+                    cross_pool: Some(vec![]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        cfg.models = vec![
+            m("p/glm", "A+", &["quota"], 1.0, (0.0, 0.0)),
+            m("o/expensive", "A", &["ondemand"], 1.0, (2.0, 8.0)),
+        ];
+        let r = Registry::from_config(&cfg, &ks()).unwrap();
+        // base policy carries the paid fallback (implicit default profile)
+        assert_eq!(
+            r.base_fallback.cross_pool,
+            Some(vec!["ondemand".to_string()])
+        );
+        // strict profile explicitly disables it
+        assert_eq!(
+            r.profiles.get("strict").unwrap().fallback.cross_pool,
+            Some(vec![])
         );
     }
 

@@ -4,7 +4,9 @@
 //! Covers streaming passthrough, failover, grade delegation, profiles,
 //! caller identity, and the Prometheus /metrics endpoint.
 
-use arouter::config::{CallerConfig, CallerMap, Config, KeyStore, ModelConfig, ProfileConfig};
+use arouter::config::{
+    CallerConfig, CallerMap, Config, FallbackConfig, KeyStore, ModelConfig, ProfileConfig,
+};
 use arouter::health::{Health, HealthPolicy};
 use arouter::metrics::Metrics;
 use arouter::proxy;
@@ -66,6 +68,28 @@ async fn good_json() -> String {
         }),
     ))
     .await
+}
+
+/// Counting variant of `good_json` — proves whether the paid upstream
+/// was ever contacted (review F7/F10 contract style).
+async fn counting_good() -> (String, Arc<AtomicUsize>) {
+    let n = Arc::new(AtomicUsize::new(0));
+    let n2 = n.clone();
+    let base = spawn_upstream(Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let n = n2.clone();
+            async move {
+                n.fetch_add(1, Ordering::SeqCst);
+                (
+                    [(header::CONTENT_TYPE, "application/json")],
+                    Body::from(JSON_BODY),
+                )
+            }
+        }),
+    ))
+    .await;
+    (base, n)
 }
 
 async fn bad_500() -> String {
@@ -1144,7 +1168,7 @@ async fn cross_pool_fallback_is_explicit_and_labeled() {
         model("zai/glm", "A", &["quota"], &bad, 1.0, (0.0, 0.0)),
         model("or/x", "A", &["ondemand"], &paid, 1.0, (1.0, 4.0)),
     ];
-    cfg.routing.fallback.cross_pool = vec!["ondemand".into()];
+    cfg.routing.fallback.cross_pool = Some(vec!["ondemand".into()]);
     let t = test_app(cfg);
 
     let resp = post_chat(&t.app, "/v1/chat/completions", "A", false, HeaderMap::new()).await;
@@ -1174,6 +1198,69 @@ async fn cross_pool_fallback_is_explicit_and_labeled() {
     .await;
     assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(hstr(&resp, "x-arouter-cross-pool"), "");
+}
+
+#[tokio::test]
+async fn profile_empty_cross_pool_disables_paid_fallback() {
+    // review F7, routing-level: a profile with `cross_pool = []` must
+    // NEVER reach the paid upstream, even though the base opts in —
+    // proven by the paid server's hit counter staying at zero
+    let bad = bad_500().await;
+    let (paid_base, paid_hits) = counting_good().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![
+        model("zai/glm", "A", &["quota"], &bad, 1.0, (0.0, 0.0)),
+        model("or/x", "A", &["ondemand"], &paid_base, 1.0, (1.0, 4.0)),
+    ];
+    cfg.routing.fallback.cross_pool = Some(vec!["ondemand".into()]);
+    cfg.profiles.insert(
+        "strict".into(),
+        ProfileConfig {
+            fallback: Some(FallbackConfig {
+                cross_pool: Some(vec![]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+    let base_models = cfg.models.clone();
+    let t = test_app(cfg);
+
+    let resp = post_chat(
+        &t.app,
+        "/strict/v1/chat/completions",
+        "A",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    // fail closed: quota pool dead, paid fallback disabled by the profile
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        paid_hits.load(Ordering::SeqCst),
+        0,
+        "paid upstream must never be contacted"
+    );
+    // the base profile (no overlay) still falls through — same config
+    let mut base = Config::default();
+    base.models = base_models;
+    base.routing.fallback.cross_pool = Some(vec!["ondemand".into()]);
+    let tb = test_app(base);
+    let resp = post_chat(
+        &tb.app,
+        "/v1/chat/completions",
+        "A",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(hstr(&resp, "x-arouter-pool"), "ondemand");
+    assert_eq!(
+        paid_hits.load(Ordering::SeqCst),
+        1,
+        "base profile pays once"
+    );
 }
 
 // ─────────────────────────── anthropic wire (E7) ───────────────────────────

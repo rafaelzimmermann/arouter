@@ -192,8 +192,12 @@ pub struct QuotaConfig {
 #[serde(default)]
 pub struct FallbackConfig {
     /// Pools this pool may fall back into when fully exhausted (opt-in).
-    pub cross_pool: Vec<String>,
+    /// Absent/None = none. A profile overlay setting `Some([])` explicitly
+    /// DISABLES an inherited base list (empty ≠ unspecified — review F7).
+    pub cross_pool: Option<Vec<String>>,
     /// Which grades may serve each requested grade (missing key = default).
+    /// Never upward: entries above the requested grade are rejected in
+    /// validation and filtered at selection (review F10).
     pub allow: BTreeMap<String, Vec<String>>,
 }
 
@@ -529,10 +533,18 @@ impl Config {
             }
         }
         for (name, allow) in &self.routing.fallback.allow {
+            let Some(ceiling) = ladder.rank(name) else {
+                return Err(format!("routing.fallback.allow: unknown grade {name:?}"));
+            };
             for t in allow {
-                if ladder.rank(t).is_none() {
+                let Some(r) = ladder.rank(t) else {
                     return Err(format!(
                         "routing.fallback.allow[{name:?}]: unknown grade {t:?}"
+                    ));
+                };
+                if r < ceiling {
+                    return Err(format!(
+                        "routing.fallback.allow[{name:?}]: {t:?} is above the requested grade — fallback never routes upward"
                     ));
                 }
             }
@@ -756,6 +768,25 @@ mod tests {
     #![allow(clippy::field_reassign_with_default)]
 
     use super::*;
+
+    #[test]
+    fn upward_fallback_allow_is_rejected() {
+        // review F10: fail loud at load, not silently at routing time
+        let mut c = Config::default();
+        c.models = vec![model("x/m", "B", &["quota"])];
+        c.routing
+            .fallback
+            .allow
+            .insert("B".into(), vec!["B".into(), "A+".into()]);
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("never routes upward"), "{err}");
+        // same-grade and downward stay legal
+        c.routing
+            .fallback
+            .allow
+            .insert("B".into(), vec!["B".into(), "C".into()]);
+        c.validate().unwrap();
+    }
 
     fn model(id: &str, grade: &str, pool: &[&str]) -> ModelConfig {
         ModelConfig {

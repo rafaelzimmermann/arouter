@@ -613,7 +613,8 @@ async fn handle_chat(
         .profiles
         .get(profile)
         .map(|p| p.fallback.cross_pool.clone())
-        .unwrap_or_else(|| reg.base_fallback.cross_pool.clone());
+        .unwrap_or_else(|| reg.base_fallback.cross_pool.clone())
+        .unwrap_or_default();
     for target in cross {
         if target == pool || !crate::config::POOLS.contains(&target.as_str()) {
             continue;
