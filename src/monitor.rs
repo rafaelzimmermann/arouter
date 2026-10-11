@@ -299,6 +299,13 @@ pub fn ema(prev: f64, sample: f64) -> f64 {
 }
 
 /// Does a model pass the active filters?
+/// A model counts as "used" once it has at least one recorded request
+/// (ok or failed) in the daemon's usage stats.  Pure display concern:
+/// hidden models remain fully routable.
+pub fn model_used(u: Option<&Usage>) -> bool {
+    u.is_some_and(|u| u.requests > 0)
+}
+
 pub fn row_matches(m: &ModelRow, pool: Option<&str>, grade: Option<&str>, search: &str) -> bool {
     if let Some(p) = pool {
         if !m.pools.iter().any(|mp| mp == p) {
@@ -458,6 +465,9 @@ pub struct Mon {
     pub sort: SortMode,
     pub search: String,
     pub search_mode: bool,
+    /// `u` — hide models with zero recorded requests (they still route;
+    /// this is a display filter only).
+    pub hide_unused: bool,
     pub active: bool,
 }
 
@@ -485,6 +495,7 @@ impl Mon {
             sort: SortMode::Grade,
             search: String::new(),
             search_mode: false,
+            hide_unused: false,
             active: false,
         }
     }
@@ -583,6 +594,9 @@ impl Mon {
                 if !m.profiles.iter().any(|p| p == &want) {
                     continue;
                 }
+            }
+            if self.hide_unused && !model_used(st.usage_by_model.get(&m.id)) {
+                continue;
             }
             let h = st.health.get(&m.id);
             let (quota_pct, reset_in) =
@@ -733,6 +747,11 @@ fn draw_filter_bar(f: &mut Frame, area: Rect, mon: &Mon) {
         Span::styled(" filters:", Style::default().fg(Color::DarkGray)),
         Span::raw(format!(" pool={pool} grade={grade} profile={profile}")),
         Span::raw(search),
+        if mon.hide_unused {
+            Span::styled(" used-only", Style::default().fg(Color::Yellow))
+        } else {
+            Span::raw("")
+        },
         Span::styled(
             format!("  sort={}", mon.sort.label()),
             Style::default().fg(Color::DarkGray),
@@ -957,6 +976,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
         " p           cycle profile filter",
         " $           sort by spend · r sort by soonest reset (g = default)",
         " /           search model ids (enter/esc to finish)",
+        " u           hide unused models — zero recorded requests (toggle)",
         " Tab         switch models → callers → engines",
         " e           jump to local engines page (E8)",
         " ?           this help · q or Esc quit",
@@ -978,7 +998,7 @@ fn draw_footer(f: &mut Frame, area: Rect, mon: &Mon) {
         ))
     } else {
         Line::from(Span::styled(
-            " 1/2/3 pool · g grade · p profile · $ sort · r resets · / search · e engines · Tab page · ? help · q quit",
+            " 1/2/3 pool · g grade · p profile · u used · $ sort · r resets · / search · e engines · Tab page · ? help · q quit",
             Style::default().fg(Color::DarkGray),
         ))
     };
@@ -1046,6 +1066,7 @@ async fn monitor_loop(
                     (KeyCode::Char('2'), _) => mon.pool_filter = toggle_pool(mon.pool_filter, "local"),
                     (KeyCode::Char('3'), _) => mon.pool_filter = toggle_pool(mon.pool_filter, "ondemand"),
                     (KeyCode::Char('g'), _) => mon.cycle_grade(),
+                    (KeyCode::Char('u'), _) => mon.hide_unused = !mon.hide_unused,
                     (KeyCode::Char('p'), _) => mon.profile_filter = (mon.profile_filter + 1) % (mon.profiles.len() + 1),
                     (KeyCode::Char('$'), _) => mon.sort = SortMode::Spend,
                     (KeyCode::Char('r'), _) => mon.sort = SortMode::ResetsSoon,
@@ -1175,6 +1196,31 @@ mod tests {
         assert_eq!(host_of("http://127.0.0.1:11434"), "127.0.0.1:11434");
         assert_eq!(host_of("https://gpu.box:8081/base"), "gpu.box:8081");
         assert_eq!(host_of("127.0.0.1:9"), "127.0.0.1:9");
+    }
+
+    #[test]
+    fn model_used_requires_requests() {
+        assert!(!model_used(None), "no usage entry = unused");
+        assert!(
+            !model_used(Some(&Usage::default())),
+            "zero requests = unused"
+        );
+        let served = Usage {
+            requests: 3,
+            ok: 2,
+            failed: 1,
+            ..Default::default()
+        };
+        assert!(model_used(Some(&served)), "any recorded request = used");
+        let failed_only = Usage {
+            requests: 1,
+            failed: 1,
+            ..Default::default()
+        };
+        assert!(
+            model_used(Some(&failed_only)),
+            "failed attempts count as used"
+        );
     }
 
     #[test]
