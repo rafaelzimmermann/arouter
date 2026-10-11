@@ -87,9 +87,13 @@ impl AppState {
     }
 }
 
-pub fn client() -> reqwest::Client {
+pub fn client(t: &crate::config::TimeoutsConfig) -> reqwest::Client {
     reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(5))
+        .connect_timeout(Duration::from_secs(t.connect_secs))
+        // review F5: read gaps are bounded — this covers stalled
+        // headers, stalled buffered bodies, AND SSE chunk gaps (a
+        // stalled stream surfaces as an error in TapStream)
+        .read_timeout(Duration::from_secs(t.idle_secs))
         .build()
         .expect("reqwest client")
 }
@@ -730,7 +734,11 @@ async fn try_candidates(
         attempts: 0,
         denials: 0,
     };
-    for m in candidates {
+    for m in candidates
+        .iter()
+        // review F5: bound candidates per request (documented top-3)
+        .take(st.cfg.timeouts.max_attempts.max(1))
+    {
         // E4: on-demand spend guards before every chargeable attempt.
         if pool == "ondemand" {
             let est_usd = quota::est_cost(m, est);
@@ -769,19 +777,134 @@ async fn try_candidates(
         }
         let prefix = m.id.split('/').next().unwrap_or("").to_string();
         let harvest = st.quota_harvest.get(&prefix).copied().unwrap_or(true);
-        match rb.send().await {
+        // review F5: headers deadline — a connected upstream that never
+        // answers fails over instead of hanging the request
+        let resp = match tokio::time::timeout(
+            Duration::from_secs(st.cfg.timeouts.headers_secs),
+            rb.send(),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(_) => {
+                record_failure(
+                    st,
+                    m,
+                    caller,
+                    profile,
+                    pool,
+                    raw_model,
+                    "timeout",
+                    None,
+                    "no response headers within headers_secs",
+                    t0.elapsed().as_millis() as u64,
+                );
+                tracing::warn!(model = m.id, "headers deadline exceeded");
+                st.health.record_failure(&m.id, true);
+                err.last_error = format!("{}: headers timeout", m.id);
+                err.attempts += 1;
+                continue;
+            }
+        };
+        match resp {
             Ok(resp) if resp.status().is_success() => {
                 let degraded = m.grade_rank != req.ceiling;
-                st.health.record_success(&m.id);
                 if harvest {
                     let w = quotaeng::harvest(resp.headers());
                     if !w.is_empty() {
                         st.quota.apply(&prefix, w, unix_now());
                     }
                 }
+                if !is_stream {
+                    // review F5: read the FULL body before committing.
+                    // Nothing has reached the client yet, so a stall or
+                    // truncation fails over to the next candidate — the
+                    // cheapest legal form of transparent retry.
+                    let ct = resp
+                        .headers()
+                        .get(header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("application/json")
+                        .to_string();
+                    let idle = Duration::from_secs(st.cfg.timeouts.idle_secs);
+                    let bytes = match tokio::time::timeout(idle, resp.bytes()).await {
+                        Ok(Ok(b)) => b,
+                        Ok(Err(e)) => {
+                            let msg = format!("body read failed: {e}");
+                            record_failure(
+                                st,
+                                m,
+                                caller,
+                                profile,
+                                pool,
+                                raw_model,
+                                "upstream_error",
+                                Some(200),
+                                &msg,
+                                t0.elapsed().as_millis() as u64,
+                            );
+                            tracing::warn!(model = m.id, "{msg}");
+                            st.health.record_failure(&m.id, true);
+                            err.last_error = format!("{}: {}", m.id, msg);
+                            err.attempts += 1;
+                            continue;
+                        }
+                        Err(_) => {
+                            let msg = "buffered body stalled past idle_secs";
+                            record_failure(
+                                st,
+                                m,
+                                caller,
+                                profile,
+                                pool,
+                                raw_model,
+                                "timeout",
+                                Some(200),
+                                msg,
+                                t0.elapsed().as_millis() as u64,
+                            );
+                            tracing::warn!(model = m.id, "{msg}");
+                            st.health.record_failure(&m.id, true);
+                            err.last_error = format!("{}: {}", m.id, msg);
+                            err.attempts += 1;
+                            continue;
+                        }
+                    };
+                    st.health.record_success(&m.id);
+                    return Ok(relay_success(
+                        st,
+                        m,
+                        caller,
+                        profile,
+                        pool,
+                        raw_model,
+                        degraded,
+                        is_stream,
+                        None,
+                        Some((ct, bytes)),
+                        t0,
+                        est,
+                        cross_from,
+                        wire,
+                    )
+                    .await);
+                }
+                st.health.record_success(&m.id);
                 return Ok(relay_success(
-                    st, m, caller, profile, pool, raw_model, degraded, is_stream, resp, t0, est,
-                    cross_from, wire,
+                    st,
+                    m,
+                    caller,
+                    profile,
+                    pool,
+                    raw_model,
+                    degraded,
+                    is_stream,
+                    Some(resp),
+                    None,
+                    t0,
+                    est,
+                    cross_from,
+                    wire,
                 )
                 .await);
             }
@@ -945,6 +1068,10 @@ fn record_failure(
     st.metrics.record(&rec);
 }
 
+/// `buffered` carries the already-read body (content-type, bytes) for
+/// non-streaming relays — try_candidates drains it so a stalled or
+/// truncated body fails over BEFORE anything is committed (review F5).
+/// `resp` is `Some` only for streaming relays.
 #[allow(clippy::too_many_arguments)]
 async fn relay_success(
     st: &AppState,
@@ -955,7 +1082,8 @@ async fn relay_success(
     requested: &str,
     degraded: bool,
     is_stream: bool,
-    resp: reqwest::Response,
+    resp: Option<reqwest::Response>,
+    buffered: Option<(String, Bytes)>,
     t0: Instant,
     est: &quota::RequestEstimate,
     cross_from: Option<&str>,
@@ -968,12 +1096,17 @@ async fn relay_success(
     } else {
         "application/json"
     };
-    let ct = resp
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or(default_ct)
-        .to_string();
+    let ct = buffered
+        .as_ref()
+        .map(|(c, _)| c.clone())
+        .or_else(|| {
+            resp.as_ref()?
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| default_ct.to_string());
 
     let mut builder = Response::builder()
         .status(StatusCode::OK)
@@ -1030,7 +1163,7 @@ async fn relay_success(
             }
         }
         let tap = TapStream::new(
-            resp.bytes_stream(),
+            resp.expect("streaming relay").bytes_stream(),
             TapMeta {
                 pool: pool.into(),
                 profile: profile.into(),
@@ -1062,34 +1195,9 @@ async fn relay_success(
         }
         builder.body(Body::from_stream(tap)).unwrap()
     } else {
-        // A 2xx whose body dies is NOT an empty success (review F4): be
-        // honest — 502 to the client, health failure, attempt recorded.
-        // No transparent retry: try_candidates already committed to this
-        // upstream when it saw the 2xx.
-        let bytes = match resp.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                st.health.record_failure(&m.id, true);
-                let rec = UsageRecord {
-                    status: "upstream_error".into(),
-                    http_status: Some(200),
-                    tokens_in: None,
-                    tokens_out: None,
-                    cost_usd: 0.0,
-                    latency_ms: t0.elapsed().as_millis() as u64,
-                    ttfb_ms: None,
-                    ..rec_meta(None, None, None, 0)
-                };
-                st.usage.record(rec.clone());
-                st.metrics.record(&rec);
-                return api_error_with(
-                    502,
-                    "upstream_error",
-                    format!("upstream body read failed: {e}"),
-                    &[(hdr::UPSTREAM, m.id.clone())],
-                );
-            }
-        };
+        // The body was fully read (and deadline-bounded) by
+        // try_candidates — stalls/truncations already failed over there.
+        let (_, bytes) = buffered.expect("buffered relay");
         let (tin, tout) = extract_usage(&bytes);
         let rec = rec_meta(tin, tout, None, t0.elapsed().as_millis() as u64);
         if pool == "ondemand" {

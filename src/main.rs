@@ -4,7 +4,7 @@
 //! `init`, `doctor`, `monitor` land in E5/E6.
 
 use arouter::catalog::Catalog;
-use arouter::config::{AutoGrades, CallerMap, Config, KeyStore};
+use arouter::config::{AutoGrades, CallerMap, Config, KeyStore, TimeoutsConfig};
 use arouter::discover;
 use arouter::health::{Health, HealthPolicy};
 use arouter::metrics::Metrics;
@@ -232,7 +232,7 @@ async fn serve(
     let reloader = Reloader {
         shared: Arc::new(RwLock::new(Arc::new(Registry::from_config(&cfg, &keys)?))),
         config_path: config.map(|p| p.to_path_buf()),
-        http: proxy::client(),
+        http: proxy::client(&TimeoutsConfig::poll()),
         discovery_interval_secs: cfg.routing.discovery_interval_secs,
     };
     reloader.reload("startup").await;
@@ -298,7 +298,7 @@ async fn serve(
         }
         if !engine_sources.is_empty() {
             if cfg.quota.poll_secs > 0 {
-                let (w, http) = (quota.clone(), proxy::client());
+                let (w, http) = (quota.clone(), proxy::client(&TimeoutsConfig::poll()));
                 let secs = cfg.quota.poll_secs;
                 tracing::info!(
                     "quota engine: {} native/manual source(s), poll every {secs}s",
@@ -354,7 +354,7 @@ async fn serve(
             .map(|e| (e.url.clone(), e.kind.clone()))
             .collect();
         let interval = std::time::Duration::from_secs(cfg.local_engines.poll_secs);
-        let (w, http) = (local.clone(), proxy::client());
+        let (w, http) = (local.clone(), proxy::client(&TimeoutsConfig::poll()));
         tokio::spawn(async move {
             arouter::localeng::run_watcher(w, http, urls, interval).await;
         });
@@ -378,7 +378,7 @@ async fn serve(
         provider_map,
         local,
         sticky,
-        http: proxy::client(),
+        http: proxy::client(&cfg.timeouts),
         started: Instant::now(),
     };
 
@@ -609,7 +609,8 @@ async fn local_registry(config: Option<&std::path::Path>) -> anyhow::Result<(Con
     let auto = AutoGrades::load(config);
     let ladder = cfg.grades.ladder();
     let catalog = Catalog::embedded(&ladder)?;
-    let discovered = discover::discover(&proxy::client(), &keys, &cfg.models).await;
+    let discovered =
+        discover::discover(&proxy::client(&TimeoutsConfig::poll()), &keys, &cfg.models).await;
     let merged = discover::merge_discovered(&cfg, &discovered, &auto, &catalog);
     let reg = Registry::from_config(&merged, &keys)?;
     Ok((cfg, reg))
@@ -625,7 +626,8 @@ async fn models(
     let auto = AutoGrades::load(config);
     let ladder = cfg.grades.ladder();
     let catalog = Catalog::embedded(&ladder)?;
-    let discovered = discover::discover(&proxy::client(), &keys, &cfg.models).await;
+    let discovered =
+        discover::discover(&proxy::client(&TimeoutsConfig::poll()), &keys, &cfg.models).await;
     let merged = discover::merge_discovered(&cfg, &discovered, &auto, &catalog);
     let reg = Registry::from_config(&merged, &keys)?;
 

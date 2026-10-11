@@ -33,6 +33,16 @@ require = false
 [grades]
 ladder = ["A+", "A", "B", "C"]
 
+# Upstream deadlines (review F5): a connected but stalled upstream must
+# never block failover. headers_secs bounds waiting for response headers;
+# idle_secs bounds gaps between body reads (SSE chunk gaps included);
+# max_attempts caps how many candidates one request may try.
+[timeouts]
+connect_secs = 5      # TCP/TLS connect
+headers_secs = 60     # first response byte after request written
+idle_secs = 120       # max gap between reads (documented "idle 120s")
+max_attempts = 3      # documented top-3 per request
+
 [routing]
 # Upstream model discovery poll (`/v1/models`, ollama /api/tags): new
 # models appear automatically, graded by catalog/heuristic. 0 = off;

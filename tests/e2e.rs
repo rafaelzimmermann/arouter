@@ -6,6 +6,7 @@
 
 use arouter::config::{
     CallerConfig, CallerMap, Config, FallbackConfig, KeyStore, ModelConfig, ProfileConfig,
+    TimeoutsConfig,
 };
 use arouter::health::{Health, HealthPolicy};
 use arouter::metrics::Metrics;
@@ -158,6 +159,7 @@ fn test_app_health_quota(cfg: Config, policy: HealthPolicy, quota_state: QuotaSt
     let health = Health::new(policy);
     let quota = QuotaWatcher::new(quota_state);
     let sticky_ttl = cfg.routing.sticky_local_secs;
+    let http = proxy::client(&cfg.timeouts);
     let local = Arc::new(arouter::localeng::LocalEngines::default());
     let sticky = Arc::new(arouter::localeng::StickyMap::new(sticky_ttl));
     let state = proxy::AppState {
@@ -173,7 +175,7 @@ fn test_app_health_quota(cfg: Config, policy: HealthPolicy, quota_state: QuotaSt
         quota_sources: Arc::new(Default::default()),
         local: local.clone(),
         sticky: sticky.clone(),
-        http: proxy::client(),
+        http,
         started: Instant::now(),
     };
     TestApp {
@@ -778,7 +780,8 @@ async fn discovery_finds_grades_and_serves_new_models() {
 
     // discovery: only the unknown model comes back
     let keys = KeyStore::default();
-    let found = discover::discover(&proxy::client(), &keys, &cfg.models).await;
+    let found =
+        discover::discover(&proxy::client(&TimeoutsConfig::poll()), &keys, &cfg.models).await;
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].id, "prov/extra-model");
     assert_eq!(found[0].context, Some(131072));
@@ -1302,6 +1305,165 @@ async fn dying_body_is_never_an_empty_success() {
     let recs = t.usage.records();
     assert_eq!(recs.len(), 1, "the dead attempt is recorded");
     assert_ne!(recs[0].status, "ok");
+}
+
+// ─────────────────────────── H4: stalls & deadlines ───────────────────────────
+
+/// Accepts the connection, then never answers within the test window
+/// (review F5: stalled headers).
+async fn stalling_headers() -> String {
+    spawn_upstream(Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            (
+                [(header::CONTENT_TYPE, "application/json")],
+                Body::from(JSON_BODY),
+            )
+        }),
+    ))
+    .await
+}
+
+/// 200 + first chunk immediately, then a long stall with the
+/// connection open (review F5: stalled buffered body / SSE gap).
+async fn stalling_body(stream: bool) -> String {
+    let ct = if stream {
+        (
+            "text/event-stream",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}}]\n\n",
+        )
+    } else {
+        ("application/json", "{\"partial\":")
+    };
+    let (ct, first) = (ct.0.to_string(), ct.1.to_string());
+    spawn_upstream(Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let ct = ct.clone();
+            let first = first.clone();
+            async move {
+                let body = Body::from_stream(futures::stream::unfold(0u8, move |state| {
+                    let first = first.clone();
+                    async move {
+                        match state {
+                            0 => Some((
+                                Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(first)),
+                                1,
+                            )),
+                            1 => {
+                                // long stall, connection stays open
+                                tokio::time::sleep(Duration::from_secs(30)).await;
+                                Some((Ok(bytes::Bytes::from("...")), 2))
+                            }
+                            _ => None,
+                        }
+                    }
+                }));
+                use axum::response::IntoResponse as _;
+                ([(header::CONTENT_TYPE, ct.as_str())], body).into_response()
+            }
+        }),
+    ))
+    .await
+}
+
+fn fast_timeouts(headers_secs: u64, idle_secs: u64) -> TimeoutsConfig {
+    TimeoutsConfig {
+        headers_secs,
+        idle_secs,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn stalled_headers_fail_over_within_the_deadline() {
+    // review F5: a connected upstream that never answers must not hang
+    // the request — the next candidate serves it
+    let stalled = stalling_headers().await;
+    let good = good_json().await;
+    let mut cfg = Config::default();
+    cfg.timeouts = fast_timeouts(1, 2);
+    cfg.models = vec![
+        model("a/stall", "B", &["quota"], &stalled, 1.0, (0.0, 0.0)),
+        model("b/good", "B", &["quota"], &good, 1.0, (0.0, 0.0)),
+    ];
+    let t = test_app(cfg);
+    let t0 = std::time::Instant::now();
+    let resp = post_chat(&t.app, "/v1/chat/completions", "B", false, HeaderMap::new()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(hstr(&resp, "x-arouter-upstream"), "b/good");
+    assert!(
+        t0.elapsed() < Duration::from_secs(5),
+        "failover must beat the stall"
+    );
+}
+
+#[tokio::test]
+async fn stalled_buffered_body_fails_over() {
+    // review F5: 200 headers, then the body stalls — nothing reached
+    // the client, so the next candidate takes over transparently
+    let stalled = stalling_body(false).await;
+    let good = good_json().await;
+    let mut cfg = Config::default();
+    cfg.timeouts = fast_timeouts(2, 1);
+    cfg.models = vec![
+        model("a/stall", "B", &["quota"], &stalled, 1.0, (0.0, 0.0)),
+        model("b/good", "B", &["quota"], &good, 1.0, (0.0, 0.0)),
+    ];
+    let t = test_app(cfg);
+    let t0 = std::time::Instant::now();
+    let resp = post_chat(&t.app, "/v1/chat/completions", "B", false, HeaderMap::new()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(hstr(&resp, "x-arouter-upstream"), "b/good");
+    assert!(t0.elapsed() < Duration::from_secs(5));
+}
+
+#[tokio::test]
+async fn mid_stream_stall_cuts_the_stream_and_records_it() {
+    // review F5: SSE chunk gap beyond idle_secs ends the stream as an
+    // upstream error (health failure), never an infinite hang
+    let stalled = stalling_body(true).await;
+    let mut cfg = Config::default();
+    cfg.timeouts = fast_timeouts(2, 1);
+    cfg.models = vec![model("a/stall", "B", &["quota"], &stalled, 1.0, (0.0, 0.0))];
+    let t = test_app(cfg);
+    let resp = post_chat(&t.app, "/v1/chat/completions", "B", true, HeaderMap::new()).await;
+    assert_eq!(resp.status(), StatusCode::OK, "headers made it");
+    let t0 = std::time::Instant::now();
+    // the stream must TERMINATE — the idle deadline surfaces as a body
+    // error, which the client may observe as a broken stream (fine);
+    // what's forbidden is hanging forever
+    let outcome = resp.into_body().collect().await;
+    assert!(outcome.is_err(), "stall cut the stream with an error");
+    assert!(
+        t0.elapsed() < Duration::from_secs(5),
+        "idle deadline cut the stall"
+    );
+    let recs = t.usage.records();
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].status, "upstream_error");
+}
+
+#[tokio::test]
+async fn attempts_are_bounded_to_max_attempts() {
+    // review F5: the documented top-N cap is enforced — five dead
+    // candidates, max_attempts = 2 → exactly two are ever hit
+    let (a, ha) = counting_500().await;
+    let (b, hb) = counting_500().await;
+    let (c, hc) = counting_500().await;
+    let mut cfg = Config::default();
+    cfg.timeouts.max_attempts = 2;
+    cfg.models = vec![
+        model("p/a", "B", &["quota"], &a, 1.0, (0.0, 0.0)),
+        model("p/b", "B", &["quota"], &b, 1.0, (0.0, 0.0)),
+        model("p/c", "B", &["quota"], &c, 1.0, (0.0, 0.0)),
+    ];
+    let t = test_app(cfg);
+    let resp = post_chat(&t.app, "/v1/chat/completions", "B", false, HeaderMap::new()).await;
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    let total = ha.load(Ordering::SeqCst) + hb.load(Ordering::SeqCst) + hc.load(Ordering::SeqCst);
+    assert_eq!(total, 2, "exactly max_attempts candidates hit");
 }
 
 // ─────────────────────────── anthropic wire (E7) ───────────────────────────

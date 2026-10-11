@@ -18,6 +18,11 @@ pub struct Config {
     pub server: ServerConfig,
     pub grades: GradesConfig,
     pub routing: RoutingConfig,
+    /// Upstream deadlines (review F5): a connected but stalled upstream
+    /// must never block failover — headers, body reads, and SSE chunk
+    /// gaps are all bounded, and the candidate list is capped.
+    #[serde(default)]
+    pub timeouts: TimeoutsConfig,
     #[serde(default)]
     pub quota_watcher: QuotaWatcherConfig,
     /// E3b native intake: `[quota]` — the router asks its upstreams
@@ -32,6 +37,67 @@ pub struct Config {
     pub models: Vec<ModelConfig>,
     pub auth: AuthConfig,
     pub callers: Vec<CallerConfig>,
+}
+
+/// Upstream deadline policy (review F5). A connected upstream that
+/// stalls — before headers, mid-body, or between SSE chunks — is cut
+/// so the next candidate can be tried. Also bounds how many
+/// candidates one request may burn through.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct TimeoutsConfig {
+    /// TCP/TLS connect budget per attempt.
+    pub connect_secs: u64,
+    /// Deadline for response HEADERS after the request is written.
+    /// A stalled-here upstream fails over to the next candidate.
+    pub headers_secs: u64,
+    /// Maximum gap between body reads (SSE chunk gaps included). Also
+    /// bounds buffered body reads. Matches the documented "idle 120s".
+    pub idle_secs: u64,
+    /// Candidates tried per request (grade order preserved). 0 is
+    /// rejected; 1 disables failover.
+    pub max_attempts: usize,
+}
+
+impl Default for TimeoutsConfig {
+    /// The documented defaults: idle 120s, headers 60s, top-3 attempts.
+    fn default() -> Self {
+        Self {
+            connect_secs: 5,
+            headers_secs: 60,
+            idle_secs: 120,
+            max_attempts: 3,
+        }
+    }
+}
+
+impl TimeoutsConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.connect_secs == 0 {
+            return Err("timeouts.connect_secs must be >= 1".into());
+        }
+        if self.headers_secs == 0 {
+            return Err("timeouts.headers_secs must be >= 1".into());
+        }
+        if self.idle_secs == 0 {
+            return Err("timeouts.idle_secs must be >= 1".into());
+        }
+        if self.max_attempts == 0 || self.max_attempts > 16 {
+            return Err("timeouts.max_attempts must be 1..=16".into());
+        }
+        Ok(())
+    }
+
+    /// Sane non-stalling defaults for background JSON polling
+    /// (quota engine, discovery): quick connect, short reads.
+    pub fn poll() -> Self {
+        Self {
+            connect_secs: 5,
+            headers_secs: 15,
+            idle_secs: 15,
+            max_attempts: 1,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -592,6 +658,7 @@ impl Config {
                 }
             }
         }
+        self.timeouts.validate()?;
         Ok(())
     }
 }
@@ -768,6 +835,45 @@ mod tests {
     #![allow(clippy::field_reassign_with_default)]
 
     use super::*;
+
+    #[test]
+    fn timeouts_defaults_match_the_docs_and_validate() {
+        // review F5: documented defaults idle 120s / top-3, all bounded
+        let t = TimeoutsConfig::default();
+        assert_eq!(
+            (t.connect_secs, t.headers_secs, t.idle_secs, t.max_attempts),
+            (5, 60, 120, 3)
+        );
+        assert!(t.validate().is_ok());
+        for bad in [
+            TimeoutsConfig {
+                connect_secs: 0,
+                ..t.clone()
+            },
+            TimeoutsConfig {
+                headers_secs: 0,
+                ..t.clone()
+            },
+            TimeoutsConfig {
+                idle_secs: 0,
+                ..t.clone()
+            },
+            TimeoutsConfig {
+                max_attempts: 0,
+                ..t.clone()
+            },
+            TimeoutsConfig {
+                max_attempts: 17,
+                ..t.clone()
+            },
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
+        }
+        // missing [timeouts] section → defaults, valid
+        let mut c = Config::default();
+        c.models = vec![model("x/m", "B", &["quota"])];
+        assert!(c.validate().is_ok());
+    }
 
     #[test]
     fn upward_fallback_allow_is_rejected() {
