@@ -1,43 +1,49 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 760" width="1160" height="760" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif"><rect x="0" y="0" width="1160" height="760" rx="16" fill="#0D1117"/>
-<polygon points="40,18 52,30 40,42 28,30" fill="#2DD4BF"/>
-<text x="62" y="34" text-anchor="start" font-size="18" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">arouter</text>
-<text x="1136" y="34" text-anchor="end" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">admin · session claim:xxxx</text>
-<rect x="24" y="84" width="540" height="220" rx="10" fill="#161B22" stroke="#30363D"/>
-<text x="40" y="112" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">users</text>
-<text x="40" y="136" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">alice</text>
-<text x="240" y="136" text-anchor="start" font-size="12" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">owner</text>
-<text x="360" y="136" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$1.24</text>
-<text x="470" y="136" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$5</text>
-<text x="540" y="136" text-anchor="end" font-size="11" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">suspend</text>
-<text x="40" y="188" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">night-agent</text>
-<text x="240" y="188" text-anchor="start" font-size="12" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">user</text>
-<text x="360" y="188" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$0.31</text>
-<text x="470" y="188" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$2</text>
-<text x="540" y="188" text-anchor="end" font-size="11" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">suspend</text>
-<text x="40" y="240" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">ci-bot</text>
-<text x="240" y="240" text-anchor="start" font-size="12" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">user</text>
-<text x="360" y="240" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$0.00</text>
-<text x="470" y="240" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$0.50</text>
-<text x="540" y="240" text-anchor="end" font-size="11" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">suspend</text>
-<text x="40" y="280" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">+ add user — name · project · daily cap · role</text>
-<rect x="584" y="84" width="552" height="220" rx="10" fill="#161B22" stroke="#30363D"/>
-<text x="600" y="106" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">access rules — tokens can only narrow</text>
-<text x="600" y="138" text-anchor="start" font-size="13" fill="#E3B341" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">A+ → quota pool only</text>
-<text x="600" y="166" text-anchor="start" font-size="13" fill="#58A6FF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">ollama/* → local tokens only</text>
-<text x="600" y="194" text-anchor="start" font-size="13" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">glm-5.3 → disabled for ci-bot</text>
-<text x="600" y="228" text-anchor="start" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">auth mode: require api token  [ON]</text>
-<text x="600" y="254" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">missing/unknown token → 401 · anonymous off</text>
-<rect x="24" y="556" width="1112" height="180" rx="10" fill="#161B22" stroke="#30363D"/>
-<text x="40" y="584" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">providers — enable · quota override</text>
-<text x="40" y="608" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">z.ai</text>
-<text x="240" y="608" text-anchor="start" font-size="12" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">enabled</text>
-<text x="360" y="608" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">33% ↻1h17m</text>
-<text x="40" y="648" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">strata</text>
-<text x="240" y="648" text-anchor="start" font-size="12" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">enabled</text>
-<text x="360" y="648" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">manual: 0% · no reset</text>
-<text x="700" y="648" text-anchor="start" font-size="11" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">override ▾</text>
-<text x="40" y="688" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">mystery-api</text>
-<text x="240" y="688" text-anchor="start" font-size="12" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">disabled</text>
-<text x="360" y="688" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">—</text>
-<text x="700" y="688" text-anchor="start" font-size="11" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">add quota window ▾</text>
+<polygon points="36,15 47,26 36,37 25,26" fill="#2DD4BF"/>
+<text x="56" y="30" text-anchor="start" font-size="17" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">arouter</text>
+<text x="1136" y="30" text-anchor="end" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">admin · session claim:xxxx</text>
+<rect x="24" y="78" width="540" height="220" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="102" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">users</text>
+<text x="40" y="130" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">alice</text>
+<text x="240" y="130" text-anchor="start" font-size="12" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">owner</text>
+<text x="360" y="130" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$1.24</text>
+<text x="470" y="130" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$5</text>
+<text x="540" y="130" text-anchor="end" font-size="11" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">suspend</text>
+<text x="40" y="182" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">night-agent</text>
+<text x="240" y="182" text-anchor="start" font-size="12" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">user</text>
+<text x="360" y="182" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$0.31</text>
+<text x="470" y="182" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$2</text>
+<text x="540" y="182" text-anchor="end" font-size="11" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">suspend</text>
+<text x="40" y="234" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">ci-bot</text>
+<text x="240" y="234" text-anchor="start" font-size="12" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">user</text>
+<text x="360" y="234" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$0.00</text>
+<text x="470" y="234" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$0.50</text>
+<text x="540" y="234" text-anchor="end" font-size="11" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">suspend</text>
+<text x="40" y="274" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">+ add user — name · project · daily cap · role</text>
+<rect x="584" y="78" width="552" height="220" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="600" y="102" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">access rules — tokens may only narrow</text>
+<text x="600" y="130" text-anchor="start" font-size="13" fill="#E3B341" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">A+ → quota pool only</text>
+<text x="600" y="158" text-anchor="start" font-size="13" fill="#58A6FF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">ollama/* → local tokens only</text>
+<text x="600" y="186" text-anchor="start" font-size="13" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">glm-5.3 → disabled for ci-bot</text>
+<text x="600" y="218" text-anchor="start" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">auth mode: require api token  [ON]</text>
+<text x="600" y="242" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">missing/unknown token → 401 · anonymous off</text>
+<rect x="24" y="314" width="1112" height="180" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="338" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">providers — enable · quota source</text>
+<rect x="40" y="354" width="74" height="22" rx="11" fill="#3FB950" opacity="0.18"/>
+<circle cx="96" cy="365" r="7" fill="#3FB950"/>
+<text x="77" y="369" text-anchor="middle" font-size="11" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">on</text>
+<text x="140" y="366" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">z.ai</text>
+<text x="300" y="366" text-anchor="start" font-size="12" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">native zai</text>
+<rect x="40" y="394" width="74" height="22" rx="11" fill="#3FB950" opacity="0.18"/>
+<circle cx="96" cy="405" r="7" fill="#3FB950"/>
+<text x="77" y="409" text-anchor="middle" font-size="11" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">on</text>
+<text x="140" y="406" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">strata</text>
+<text x="300" y="406" text-anchor="start" font-size="12" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">manual</text>
+<text x="700" y="406" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">override ▾</text>
+<rect x="40" y="434" width="74" height="22" rx="11" fill="#F45067" opacity="0.18"/>
+<circle cx="58" cy="445" r="7" fill="#F45067"/>
+<text x="77" y="449" text-anchor="middle" font-size="11" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">off</text>
+<text x="140" y="446" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">mystery-api</text>
+<text x="300" y="446" text-anchor="start" font-size="12" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">off</text>
+<text x="700" y="446" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">enable ▾</text>
 </svg>

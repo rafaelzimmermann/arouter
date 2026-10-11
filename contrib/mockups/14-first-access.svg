@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 700" width="1160" height="700" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif"><rect x="0" y="0" width="1160" height="700" rx="16" fill="#0D1117"/>
+<polygon points="36,15 47,26 36,37 25,26" fill="#2DD4BF"/>
+<text x="56" y="30" text-anchor="start" font-size="17" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">arouter</text>
+<text x="1136" y="30" text-anchor="end" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">first visit · no admin exists yet</text>
+<rect x="24" y="76" width="1112" height="44" rx="6" fill="#30363D" opacity="0.6"/>
+<text x="40" y="104" text-anchor="start" font-size="14" fill="#2DD4BF" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">http://192.168.50.192:3929/</text>
+<rect x="24" y="136" width="640" height="260" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="160" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">this router is not yours yet</text>
+<text x="40" y="192" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">Nobody has claimed it. Routing already works — management does not.</text>
+<text x="40" y="220" text-anchor="start" font-size="#3FB950" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">open mode: any caller on the network can ask for a grade</text>
+<text x="40" y="246" text-anchor="start" font-size="#8B949E" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">no admin, no users, no tokens — nothing to manage yet</text>
+<text x="40" y="276" text-anchor="start" font-size="#E6EDF3" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">to manage it, open the claim line the daemon printed:</text>
+<rect x="40" y="296" width="480" height="34" rx="6" fill="#30363D" opacity="0.5"/>
+<text x="56" y="320" text-anchor="start" font-size="14" fill="#2DD4BF" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">http://127.0.0.1:3929/claim/8f2c71</text>
+<text x="40" y="352" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">that link answers only to localhost · single-use · 15 min</text>
+<rect x="684" y="136" width="452" height="260" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="700" y="160" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">why the browser can be told "no"</text>
+<text x="700" y="188" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">· opened from a phone on the LAN → link refuses (not localhost)</text>
+<text x="700" y="214" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">· link already used → refuses, and says which step failed</text>
+<text x="700" y="240" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">· daemon restarted → the old code is gone, a new one prints</text>
+<text x="700" y="266" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">· no claim wanted? nothing breaks — the web layer is optional</text>
+<rect x="24" y="412" width="1112" height="140" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="436" text-anchor="start" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">the claim is the only unauthenticated door in the whole app</text>
+<text x="40" y="464" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">· it grants nothing by itself — the code printed in the terminal must be pasted too</text>
+<text x="40" y="490" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">· everything after it needs a session cookie + same-Origin check</text>
+</svg>

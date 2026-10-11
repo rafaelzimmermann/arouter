@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 620" width="1160" height="620" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif"><rect x="0" y="0" width="1160" height="620" rx="16" fill="#0D1117"/>
+<polygon points="36,15 47,26 36,37 25,26" fill="#2DD4BF"/>
+<text x="56" y="30" text-anchor="start" font-size="17" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">arouter</text>
+<text x="1136" y="30" text-anchor="end" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">claimed · alice is the owner</text>
+<rect x="24" y="76" width="540" height="220" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="100" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">what is true now</text>
+<text x="40" y="128" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">owner</text>
+<text x="540" y="128" text-anchor="end" font-size="12" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">alice · since 2026-10-11</text>
+<text x="40" y="154" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">session</text>
+<text x="540" y="154" text-anchor="end" font-size="12" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">signed in · sliding 12h</text>
+<text x="40" y="180" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">password</text>
+<text x="540" y="180" text-anchor="end" font-size="12" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">argon2id · ~/.config/arouter/web.toml · 0600</text>
+<text x="40" y="206" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">auth mode</text>
+<text x="540" y="206" text-anchor="end" font-size="12" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">open — routing unchanged</text>
+<rect x="584" y="76" width="552" height="220" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="600" y="100" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">next, in the order that matters</text>
+<text x="600" y="128" text-anchor="start" font-size="12" fill="#E3B341" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">→ restrict access — turn auth on when you want tokens</text>
+<text x="600" y="156" text-anchor="start" font-size="12" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">→ issue tokens per agent, each with its own reach</text>
+<text x="600" y="184" text-anchor="start" font-size="12" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">→ add users for people who need a cap</text>
+<text x="600" y="212" text-anchor="start" font-size="12" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">→ disable the models you never want served</text>
+<rect x="24" y="312" width="1112" height="140" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="336" text-anchor="start" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">the overlay is the only file this screen writes</text>
+<text x="40" y="356" text-anchor="start" font-size="#3FB950" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">~/.config/arouter/config.toml   yours · hand-written · never rewritten</text>
+<text x="40" y="382" text-anchor="start" font-size="#2DD4BF" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">~/.config/arouter/web.toml      managed · 0600 · owner, users, tokens, rules, overrides</text>
+<text x="40" y="408" text-anchor="start" font-size="#8B949E" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">precedence: manual config &gt; overlay &gt; discovered — a web change cannot shadow your file</text>
+<text x="24" y="598" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">undo is per change: every write reports the file and the key it touched</text>
+</svg>

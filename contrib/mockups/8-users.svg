@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 700" width="1160" height="700" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif"><rect x="0" y="0" width="1160" height="700" rx="16" fill="#0D1117"/>
+<polygon points="36,15 47,26 36,37 25,26" fill="#2DD4BF"/>
+<text x="56" y="30" text-anchor="start" font-size="17" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">arouter</text>
+<text x="1136" y="30" text-anchor="end" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">users · spend is per caller, caps stack</text>
+<rect x="24" y="76" width="640" height="260" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="100" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">callers</text>
+<text x="40" y="132" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">alice</text>
+<text x="280" y="132" text-anchor="start" font-size="12" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">owner</text>
+<text x="420" y="132" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$1.24</text>
+<text x="540" y="132" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$5</text>
+<text x="648" y="132" text-anchor="end" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">3 token</text>
+<text x="40" y="184" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">night-agent</text>
+<text x="280" y="184" text-anchor="start" font-size="12" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">user</text>
+<text x="420" y="184" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$0.31</text>
+<text x="540" y="184" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$2</text>
+<text x="648" y="184" text-anchor="end" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">1 token</text>
+<text x="40" y="236" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">ci-bot</text>
+<text x="280" y="236" text-anchor="start" font-size="12" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">user</text>
+<text x="420" y="236" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$0.00</text>
+<text x="540" y="236" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$0.50</text>
+<text x="648" y="236" text-anchor="end" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">1 token</text>
+<text x="40" y="288" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">guest-4</text>
+<text x="280" y="288" text-anchor="start" font-size="12" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">suspended</text>
+<text x="420" y="288" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">—</text>
+<text x="540" y="288" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">—</text>
+<text x="648" y="288" text-anchor="end" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">0 token</text>
+<text x="40" y="308" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">+ add user — name · project · email? · daily cap · role</text>
+<rect x="684" y="76" width="452" height="260" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="700" y="100" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">add user</text>
+<text x="700" y="128" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">name</text>
+<text x="1120" y="128" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">night-shift</text>
+<text x="700" y="154" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">project</text>
+<text x="1120" y="154" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">home lab</text>
+<text x="700" y="180" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">daily cap</text>
+<text x="1120" y="180" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$2.00</text>
+<text x="700" y="206" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">role</text>
+<text x="1120" y="206" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">user</text>
+<text x="700" y="232" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">auth</text>
+<text x="1120" y="232" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">token (generated on save)</text>
+<rect x="700" y="266" width="170" height="30" rx="6" fill="#3FB950" opacity="0.2"/>
+<text x="785" y="286" text-anchor="middle" font-size="12" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">create user</text>
+<rect x="24" y="352" width="1112" height="160" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="376" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">spend — 24h per caller, caps stack min(pool, profile, caller)</text>
+<text x="40" y="408" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">alice</text>
+<rect x="240" y="402" width="600" height="8" rx="4" fill="#30363D"/>
+<rect x="240" y="402" width="150.0" height="8" rx="4" fill="#E3B341"/>
+<text x="880" y="408" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$ 5.00 of $5</text>
+<text x="40" y="438" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">night-agent</text>
+<rect x="240" y="432" width="600" height="8" rx="4" fill="#30363D"/>
+<rect x="240" y="432" width="96.0" height="8" rx="4" fill="#E3B341"/>
+<text x="880" y="438" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$ 3.20 of $2</text>
+<text x="40" y="468" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">ci-bot</text>
+<rect x="240" y="462" width="600" height="8" rx="4" fill="#30363D"/>
+<rect x="240" y="462" width="12.0" height="8" rx="4" fill="#E3B341"/>
+<text x="880" y="468" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$ 0.40 of $0.50</text>
+<text x="24" y="678" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">a caller that exceeds its cap gets 402 — the response names the cap, not the provider</text>
+</svg>

@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 700" width="1160" height="700" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif"><rect x="0" y="0" width="1160" height="700" rx="16" fill="#0D1117"/>
+<polygon points="36,15 47,26 36,37 25,26" fill="#2DD4BF"/>
+<text x="56" y="30" text-anchor="start" font-size="17" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">arouter</text>
+<text x="1136" y="30" text-anchor="end" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">settings · admin only</text>
+<rect x="24" y="76" width="540" height="240" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="100" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">access control</text>
+<rect x="40" y="128" width="74" height="22" rx="11" fill="#3FB950" opacity="0.18"/>
+<circle cx="96" cy="139" r="7" fill="#3FB950"/>
+<text x="77" y="143" text-anchor="middle" font-size="11" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">on</text>
+<text x="140" y="140" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">require api token</text>
+<rect x="40" y="168" width="74" height="22" rx="11" fill="#F45067" opacity="0.18"/>
+<circle cx="58" cy="179" r="7" fill="#F45067"/>
+<text x="77" y="183" text-anchor="middle" font-size="11" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">off</text>
+<text x="140" y="180" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">anonymous allowed</text>
+<rect x="40" y="208" width="74" height="22" rx="11" fill="#F45067" opacity="0.18"/>
+<circle cx="58" cy="219" r="7" fill="#F45067"/>
+<text x="77" y="223" text-anchor="middle" font-size="11" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">off</text>
+<text x="140" y="220" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">cross_pool into on-demand</text>
+<text x="40" y="256" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">off = anyone on the LAN can route · on = 401 without a token</text>
+<text x="40" y="280" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">changing this logs the admin, the session and the time</text>
+<rect x="584" y="76" width="552" height="240" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="600" y="100" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">quota engine</text>
+<text x="600" y="128" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">poll</text>
+<text x="1120" y="128" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">every 15 min</text>
+<text x="600" y="154" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">sources</text>
+<text x="1120" y="154" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">native · headers · manual</text>
+<text x="600" y="180" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">undocumented</text>
+<text x="1120" y="180" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">opt-in per provider</text>
+<text x="600" y="206" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">on failure</text>
+<text x="1120" y="206" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">keep last snapshot</text>
+<text x="600" y="246" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">no external quota tool — the router asks its own upstreams</text>
+<rect x="24" y="332" width="1112" height="180" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="356" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">budgets — the paid pool stays guarded</text>
+<text x="40" y="384" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">pool on-demand</text>
+<text x="1120" y="384" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$5/day · $25/month</text>
+<text x="40" y="410" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">profile arouter-night-ondemand</text>
+<text x="1120" y="410" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$1/day · $5/month</text>
+<text x="40" y="436" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">caller alice</text>
+<text x="1120" y="436" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$5/day · $20/month</text>
+<text x="40" y="462" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">pace window</text>
+<text x="1120" y="462" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">1h rolling</text>
+<text x="40" y="488" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">effective cap = min(pool, profile, caller) — a token can only lower it</text>
+<text x="24" y="678" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">settings write to the managed overlay · your config.toml is never rewritten</text>
+</svg>

@@ -400,9 +400,9 @@ def s10():
     panel(d, 24, y, 1112, 300, "candidates — grade is the primary sort key, everything else reorders within it")
     rows = [("glm-5.3", "quota", "avail 1.0 × health 0.9 × weight 1.5 × drain 1.4", "= 1.89", "chosen", GREEN),
             ("glm-5.2", "quota", "avail 1.0 × health 0.9 × weight 1.0", "= 0.90", "", DIM),
-            ("or/claude-opus-4.6", "ondemand", "pool outside token scope", "excluded", RED),
-            ("qwen3.8-flash", "local", "grade B below request A+ — not eligible", "excluded", RED),
-            ("glm-4.6", "quota", "window exhausted · resets in 1h17m", "excluded", RED)]
+            ("or/claude-opus-4.6", "ondemand", "pool outside token scope", "excluded", "", RED),
+            ("qwen3.8-flash", "local", "grade B below request A+ — not eligible", "excluded", "", RED),
+            ("glm-4.6", "quota", "window exhausted · resets in 1h17m", "excluded", "", RED)]
     for i, (m, pool, why, score, tag, col) in enumerate(rows):
         ry = y + 56 + i * 46
         d.text(40, ry, m, 14, TXT, font=MONO)
@@ -425,10 +425,10 @@ def s11():
     header(d, 22, "what a caller sees when we say no")
     y = 76
     for i, (code, title, body, fix, col) in enumerate([
-        ("401", "no valid token", "arouter requires an api token on this network", "create a token at /tokens"),
-        ("403", "outside token scope", "this token may not reach the on-demand pool", "use a token that may, or lower the grade"),
-        ("402", "budget spent", "caller night-agent hit its $2/day cap", "raise the cap, or wait for the window"),
-        ("403", "model disabled", "glm-5.3 is disabled by the owner", "ask them, or pick another grade")]):
+        ("401", "no valid token", "arouter requires an api token on this network", "create a token at /tokens", RED),
+        ("403", "outside token scope", "this token may not reach the on-demand pool", "use a token that may, or lower the grade", RED),
+        ("402", "budget spent", "caller night-agent hit its $2/day cap", "raise the cap, or wait for the window", RED),
+        ("403", "model disabled", "glm-5.3 is disabled by the owner", "ask them, or pick another grade", RED)]):
         x = 24 + i * 280
         d.rect(x, y, 264, 200)
         d.text(x + 16, y + 34, code, 20, col, weight="bold")

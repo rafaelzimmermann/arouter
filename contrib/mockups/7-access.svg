@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 700" width="1160" height="700" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif"><rect x="0" y="0" width="1160" height="700" rx="16" fill="#0D1117"/>
+<polygon points="36,15 47,26 36,37 25,26" fill="#2DD4BF"/>
+<text x="56" y="30" text-anchor="start" font-size="17" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">arouter</text>
+<text x="1136" y="30" text-anchor="end" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">access rules · admin sets the ceiling, tokens only narrow</text>
+<rect x="24" y="76" width="640" height="240" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="100" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">global rules</text>
+<text x="40" y="128" text-anchor="start" font-size="13" fill="#E3B341" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">A+ → quota pool only · ondemand: vip tokens</text>
+<text x="40" y="158" text-anchor="start" font-size="13" fill="#58A6FF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">ollama/* → local tokens only</text>
+<text x="40" y="188" text-anchor="start" font-size="13" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">glm-5.3 → disabled for ci-bot</text>
+<text x="40" y="218" text-anchor="start" font-size="13" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">vip tier → may cross into ondemand</text>
+<text x="40" y="266" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">a rule can only remove candidates — never add a pool a token lacks</text>
+<rect x="684" y="76" width="452" height="240" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="700" y="100" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">narrow with a token</text>
+<text x="700" y="128" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">token</text>
+<text x="1120" y="128" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">night-agent</text>
+<text x="700" y="154" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">grades</text>
+<text x="1120" y="154" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">A+ .. A</text>
+<text x="700" y="180" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">pools</text>
+<text x="1120" y="180" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">quota</text>
+<text x="700" y="206" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">models</text>
+<text x="1120" y="206" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">all except ollama/*</text>
+<text x="700" y="246" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">effective reach = rules ∩ token scopes</text>
+<rect x="24" y="332" width="1112" height="180" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="356" text-anchor="start" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">who can reach what — computed, never hand-set</text>
+<text x="300" y="376" text-anchor="middle" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">glm-5.3</text>
+<text x="480" y="376" text-anchor="middle" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">glm-5.2</text>
+<text x="660" y="376" text-anchor="middle" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">qwen3.8</text>
+<text x="840" y="376" text-anchor="middle" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">or/opus-4.6</text>
+<text x="40" y="408" text-anchor="start" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">alice (owner)</text>
+<circle cx="300" cy="404" r="7" fill="#3FB950"/>
+<circle cx="480" cy="404" r="7" fill="#3FB950"/>
+<circle cx="660" cy="404" r="7" fill="#3FB950"/>
+<circle cx="840" cy="404" r="7" fill="#3FB950"/>
+<text x="40" y="442" text-anchor="start" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">night-agent</text>
+<circle cx="300" cy="438" r="7" fill="#3FB950"/>
+<circle cx="480" cy="438" r="7" fill="#3FB950"/>
+<circle cx="660" cy="438" r="7" fill="#3FB950"/>
+<circle cx="840" cy="438" r="7" fill="#F45067"/>
+<text x="40" y="476" text-anchor="start" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">ci-bot</text>
+<circle cx="300" cy="472" r="7" fill="#F45067"/>
+<circle cx="480" cy="472" r="7" fill="#3FB950"/>
+<circle cx="660" cy="472" r="7" fill="#3FB950"/>
+<circle cx="840" cy="472" r="7" fill="#F45067"/>
+<text x="24" y="678" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">the matrix is derived at request time — it is a view, not a second source of truth</text>
+</svg>

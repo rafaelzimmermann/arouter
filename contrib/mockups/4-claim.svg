@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 620" width="1160" height="620" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif"><rect x="0" y="0" width="1160" height="620" rx="16" fill="#0D1117"/>
+<polygon points="36,15 47,26 36,37 25,26" fill="#2DD4BF"/>
+<text x="56" y="30" text-anchor="start" font-size="17" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">arouter</text>
+<text x="1136" y="30" text-anchor="end" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">first run</text>
+<rect x="24" y="76" width="540" height="240" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="100" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">claim this router</text>
+<text x="40" y="132" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">someone must own this router before anything else works.</text>
+<rect x="40" y="160" width="500" height="44" rx="6" fill="#30363D" opacity="0.5"/>
+<text x="60" y="188" text-anchor="start" font-size="15" fill="#2DD4BF" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">http://127.0.0.1:3929/claim/8f2c71</text>
+<text x="40" y="224" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">single-use · works from localhost only · expires in 15 min</text>
+<text x="40" y="248" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">the daemon prints this line under the banner, once.</text>
+<rect x="40" y="272" width="160" height="30" rx="6" fill="#2DD4BF" opacity="0.2"/>
+<text x="120" y="292" text-anchor="middle" font-size="12" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">open claim link</text>
+<rect x="584" y="76" width="552" height="240" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="600" y="100" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">return visit — sign in</text>
+<text x="600" y="132" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">session</text>
+<text x="1120" y="132" text-anchor="end" font-size="12" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">HttpOnly cookie · 12h sliding</text>
+<text x="600" y="158" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">writes</text>
+<text x="1120" y="158" text-anchor="end" font-size="12" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">cookie + same-Origin header required</text>
+<text x="600" y="184" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">no password in the URL</text>
+<text x="1120" y="184" text-anchor="end" font-size="12" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">nothing to leak into logs</text>
+<text x="600" y="226" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">admin since 2026-10-11 · 2 users · auth require ON</text>
+<rect x="24" y="332" width="1112" height="120" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="356" text-anchor="start" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">why this is safe on a LAN over plain HTTP</text>
+<text x="40" y="384" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">· transport is still trusted-network — keys protect identity, not the wire</text>
+<text x="40" y="410" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">· writes are the thing that matters: they need a session and a same-Origin check</text>
+<text x="40" y="436" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">· the claim link is the only unauthenticated door, and it is localhost-only and single-use</text>
+</svg>

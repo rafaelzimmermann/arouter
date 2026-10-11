@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 700" width="1160" height="700" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif"><rect x="0" y="0" width="1160" height="700" rx="16" fill="#0D1117"/>
+<polygon points="36,15 47,26 36,37 25,26" fill="#2DD4BF"/>
+<text x="56" y="30" text-anchor="start" font-size="17" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">arouter</text>
+<text x="1136" y="30" text-anchor="end" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">why this model was chosen</text>
+<rect x="24" y="76" width="1112" height="60" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="100" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">POST /v1/chat/completions · model A+ · caller night-agent · token ark_•••</text>
+<rect x="24" y="148" width="1112" height="300" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="172" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">candidates — grade is the primary sort key, everything else reorders within it</text>
+<text x="40" y="204" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">glm-5.3</text>
+<text x="300" y="204" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">quota</text>
+<text x="420" y="204" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">avail 1.0 × health 0.9 × weight 1.5 × drain 1.4</text>
+<text x="880" y="204" text-anchor="start" font-size="12" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">= 1.89</text>
+<text x="1120" y="204" text-anchor="end" font-size="12" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">✓ chosen</text>
+<text x="40" y="250" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">glm-5.2</text>
+<text x="300" y="250" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">quota</text>
+<text x="420" y="250" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">avail 1.0 × health 0.9 × weight 1.0</text>
+<text x="880" y="250" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">= 0.90</text>
+<text x="40" y="296" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">or/claude-opus-4.6</text>
+<text x="300" y="296" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">ondemand</text>
+<text x="420" y="296" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">pool outside token scope</text>
+<text x="880" y="296" text-anchor="start" font-size="12" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">excluded</text>
+<text x="40" y="342" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">qwen3.8-flash</text>
+<text x="300" y="342" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">local</text>
+<text x="420" y="342" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">grade B below request A+ — not eligible</text>
+<text x="880" y="342" text-anchor="start" font-size="12" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">excluded</text>
+<text x="40" y="388" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">glm-4.6</text>
+<text x="300" y="388" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">quota</text>
+<text x="420" y="388" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">window exhausted · resets in 1h17m</text>
+<text x="880" y="388" text-anchor="start" font-size="12" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">excluded</text>
+<rect x="24" y="464" width="1112" height="160" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="488" text-anchor="start" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">the drain rule — use it or lose it</text>
+<text x="40" y="508" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">z.ai has 33% left and its 5h window resets in 1h17m — that quota is a wasting asset.</text>
+<text x="40" y="534" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">so penalties lift and ties resolve toward the soonest reset: spend it now, not after it rolls.</text>
+<text x="40" y="560" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">exhaustion still hard-stops the candidate; drain only reorders inside a grade — it never crosses pools.</text>
+<text x="24" y="678" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">same numbers the monitor TUI and the Grafana gauges show — one source of truth</text>
+</svg>

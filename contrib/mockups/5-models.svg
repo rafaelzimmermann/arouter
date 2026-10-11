@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 780" width="1160" height="780" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif"><rect x="0" y="0" width="1160" height="780" rx="16" fill="#0D1117"/>
+<polygon points="36,15 47,26 36,37 25,26" fill="#2DD4BF"/>
+<text x="56" y="30" text-anchor="start" font-size="17" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">arouter</text>
+<text x="1136" y="30" text-anchor="end" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">477 models · 3 grades · 6 providers</text>
+<rect x="24" y="76" width="1112" height="44" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="100" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">filter — grade ▾ · pool ▾ · provider ▾ · search "glm"</text>
+<rect x="24" y="132" width="640" height="300" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="156" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">models — sorted by grade, then weight</text>
+<circle cx="40" cy="184" r="6" fill="#3FB950"/>
+<text x="56" y="188" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">glm-5.3</text>
+<text x="300" y="188" text-anchor="start" font-size="14" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">A+</text>
+<text x="350" y="188" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">quota</text>
+<text x="470" y="188" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">z.ai · coding plan</text>
+<text x="648" y="188" text-anchor="end" font-size="11" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">edit grade</text>
+<circle cx="40" cy="230" r="6" fill="#3FB950"/>
+<text x="56" y="234" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">glm-5.2</text>
+<text x="300" y="234" text-anchor="start" font-size="14" fill="#E3B341" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">A</text>
+<text x="350" y="234" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">quota</text>
+<text x="470" y="234" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">z.ai · coding plan</text>
+<text x="648" y="234" text-anchor="end" font-size="11" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">edit grade</text>
+<circle cx="40" cy="276" r="6" fill="#3FB950"/>
+<text x="56" y="280" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">glm-4.5-air</text>
+<text x="300" y="280" text-anchor="start" font-size="14" fill="#58A6FF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">B</text>
+<text x="350" y="280" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">quota</text>
+<text x="470" y="280" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">z.ai · coding plan</text>
+<text x="648" y="280" text-anchor="end" font-size="11" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">edit grade</text>
+<circle cx="40" cy="322" r="6" fill="#3FB950"/>
+<text x="56" y="326" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">qwen3.8-flash</text>
+<text x="300" y="326" text-anchor="start" font-size="14" fill="#58A6FF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">B</text>
+<text x="350" y="326" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">local</text>
+<text x="470" y="326" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">strata · llama.cpp</text>
+<text x="648" y="326" text-anchor="end" font-size="11" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">edit grade</text>
+<circle cx="40" cy="368" r="6" fill="#F45067"/>
+<text x="56" y="372" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">or/llama-405b</text>
+<text x="300" y="372" text-anchor="start" font-size="14" fill="#58A6FF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">B</text>
+<text x="350" y="372" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">ondemand</text>
+<text x="470" y="372" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$0.15/$0.6 · off</text>
+<text x="648" y="372" text-anchor="end" font-size="11" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">edit grade</text>
+<rect x="684" y="132" width="452" height="300" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="700" y="156" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">add a model</text>
+<text x="700" y="184" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">id</text>
+<text x="1120" y="184" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">z.ai/glm-5.4</text>
+<text x="700" y="210" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">grade</text>
+<text x="1120" y="210" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">A+</text>
+<text x="700" y="236" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">pool</text>
+<text x="1120" y="236" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">quota</text>
+<text x="700" y="262" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">context</text>
+<text x="1120" y="262" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">200k</text>
+<text x="700" y="288" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">pricing</text>
+<text x="1120" y="288" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">in $0.6 · out $1.8 / Mtok</text>
+<text x="700" y="314" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">quota source</text>
+<text x="1120" y="314" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">native zai</text>
+<rect x="700" y="358" width="150" height="30" rx="6" fill="#3FB950" opacity="0.2"/>
+<text x="775" y="378" text-anchor="middle" font-size="12" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">add model</text>
+<text x="700" y="404" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">goes to the managed overlay — your config.toml untouched</text>
+<rect x="24" y="448" width="1112" height="140" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="472" text-anchor="start" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">grade adjust — preview before it applies</text>
+<text x="40" y="488" text-anchor="start" font-size="15" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">glm-5.3   A+ → A</text>
+<text x="40" y="514" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">what changes: 38 → 50 models at A · A+ now served by glm-5.2, or/opus-4.6</text>
+<text x="40" y="538" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">what does not change: pools, budgets, which providers exist</text>
+<rect x="40" y="554" width="200" height="28" rx="6" fill="#2DD4BF" opacity="0.18"/>
+<text x="140" y="572" text-anchor="middle" font-size="12" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">apply · undo</text>
+<text x="24" y="758" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">discovered models keep weight 0.5 and never outrank a graded model</text>
+</svg>

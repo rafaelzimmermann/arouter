@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 700" width="1160" height="700" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif"><rect x="0" y="0" width="1160" height="700" rx="16" fill="#0D1117"/>
+<polygon points="36,15 47,26 36,37 25,26" fill="#2DD4BF"/>
+<text x="56" y="30" text-anchor="start" font-size="17" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">arouter</text>
+<text x="1136" y="30" text-anchor="end" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">install · one command, no sudo</text>
+<rect x="24" y="76" width="700" height="300" rx="10" fill="#0B0F14" stroke="#30363D"/>
+<text x="40" y="106" text-anchor="start" font-size="14" fill="#2DD4BF" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">$ curl -fsSL https://arouter.sh/install.sh | sh</text>
+<text x="40" y="138" text-anchor="start" font-size="13" fill="#E6EDF3" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">  build   </text>
+<text x="150" y="138" text-anchor="start" font-size="12" fill="#8B949E" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">cargo build --release --locked</text>
+<text x="700" y="138" text-anchor="end" font-size="12" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">ok · 2m11s</text>
+<text x="40" y="172" text-anchor="start" font-size="13" fill="#E6EDF3" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">  place   </text>
+<text x="150" y="172" text-anchor="start" font-size="12" fill="#8B949E" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">~/.local/bin/arouter</text>
+<text x="700" y="172" text-anchor="end" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">4.8 MB · mode 755</text>
+<text x="40" y="206" text-anchor="start" font-size="13" fill="#E6EDF3" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">  init    </text>
+<text x="150" y="206" text-anchor="start" font-size="12" fill="#8B949E" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">~/.config/arouter/config.toml</text>
+<text x="700" y="206" text-anchor="end" font-size="12" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">written · 0600</text>
+<text x="40" y="240" text-anchor="start" font-size="13" fill="#E6EDF3" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">  doctor  </text>
+<text x="150" y="240" text-anchor="start" font-size="12" fill="#8B949E" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">12 checks</text>
+<text x="700" y="240" text-anchor="end" font-size="12" fill="#E3B341" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">0 errors · 2 warnings</text>
+<text x="40" y="274" text-anchor="start" font-size="13" fill="#E6EDF3" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">  serve   </text>
+<text x="150" y="274" text-anchor="start" font-size="12" fill="#8B949E" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">daemon up · 0.0.0.0:3929</text>
+<text x="700" y="274" text-anchor="end" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">systemd unit optional</text>
+<text x="40" y="322" text-anchor="start" font-size="13" fill="#2DD4BF" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">  web     claim http://127.0.0.1:3929/claim/8f2c71</text>
+<text x="40" y="348" text-anchor="start" font-size="11" fill="#8B949E" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">          ↑ open from this machine — the only unclaimed door</text>
+<rect x="744" y="76" width="392" height="300" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="760" y="100" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">what install.sh deliberately does not do</text>
+<text x="760" y="128" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">· no sudo, no /usr/bin, no PATH edit</text>
+<text x="760" y="154" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">· PREFIX= override for the careful</text>
+<text x="760" y="180" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">· --skip-init for a config you already own</text>
+<text x="760" y="206" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">· init is idempotent — never overwrites</text>
+<text x="760" y="232" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">· nothing starts until you say serve</text>
+<rect x="24" y="392" width="1112" height="160" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="416" text-anchor="start" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">arouter doctor — the gate before anything routes</text>
+<text x="40" y="444" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">config parse</text>
+<text x="1120" y="444" text-anchor="end" font-size="12" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">ok · 477 models catalogued</text>
+<text x="40" y="470" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">keys</text>
+<text x="1120" y="470" text-anchor="end" font-size="12" fill="#E3B341" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">zai ok · openrouter ok · codex missing</text>
+<text x="40" y="496" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">quota sources</text>
+<text x="1120" y="496" text-anchor="end" font-size="12" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">zai native · strata manual · codex headers</text>
+<text x="40" y="522" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">bind</text>
+<text x="1120" y="522" text-anchor="end" font-size="12" fill="#E3B341" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">0.0.0.0 — LAN exposed, auth require off</text>
+<text x="24" y="678" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">warnings never block: the router runs, and tells you what it could not see</text>
+</svg>

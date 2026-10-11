@@ -1,36 +1,36 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 700" width="1160" height="700" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif"><rect x="0" y="0" width="1160" height="700" rx="16" fill="#0D1117"/>
-<polygon points="40,18 52,30 40,42 28,30" fill="#2DD4BF"/>
-<text x="62" y="34" text-anchor="start" font-size="18" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">arouter</text>
-<text x="1136" y="34" text-anchor="end" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">alice · 2 of 5 tokens</text>
-<rect x="24" y="84" width="540" height="250" rx="10" fill="#161B22" stroke="#30363D"/>
-<text x="40" y="112" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">your api tokens</text>
-<text x="40" y="136" text-anchor="start" font-size="15" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">night-agent</text>
-<text x="240" y="136" text-anchor="start" font-size="13" fill="#8B949E" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">ark_••••••••••••••</text>
-<text x="40" y="160" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">grades A+..A · pools quota · models all</text>
-<text x="40" y="180" text-anchor="start" font-size="12" fill="#E3B341" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$2/day</text>
-<text x="540" y="136" text-anchor="end" font-size="11" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">revoke</text>
-<text x="40" y="228" text-anchor="start" font-size="15" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">ci-bot</text>
-<text x="240" y="228" text-anchor="start" font-size="13" fill="#8B949E" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">ark_••••••••••</text>
-<text x="40" y="252" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">grade B · pools local · models ollama/*</text>
-<text x="40" y="272" text-anchor="start" font-size="12" fill="#E3B341" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$0</text>
-<text x="540" y="228" text-anchor="end" font-size="11" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">revoke</text>
-<rect x="584" y="84" width="552" height="250" rx="10" fill="#161B22" stroke="#30363D"/>
-<text x="600" y="112" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">new token</text>
-<text x="600" y="144" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">name</text>
-<text x="1120" y="144" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">night-agent</text>
-<text x="600" y="170" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">grades</text>
-<text x="1120" y="170" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">A+ .. A</text>
-<text x="600" y="196" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">pools</text>
-<text x="1120" y="196" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">quota · local</text>
-<text x="600" y="222" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">models</text>
-<text x="1120" y="222" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">all except ollama/*</text>
-<text x="600" y="248" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">daily budget</text>
-<text x="1120" y="248" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$2.00</text>
-<rect x="600" y="276" width="120" height="30" rx="6" fill="#3FB950" opacity="0.2"/>
-<text x="660" y="296" text-anchor="middle" font-size="13" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">create</text>
-<rect x="24" y="376" width="1112" height="120" rx="10" fill="#161B22" stroke="#30363D"/>
-<text x="40" y="402" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">what this token can and cannot do</text>
-<text x="40" y="428" text-anchor="start" font-size="12" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">✓ reaches glm-5.3, glm-5.2, qwen3.8-flash — whatever is healthiest at request time</text>
-<text x="40" y="452" text-anchor="start" font-size="12" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">✗ can never reach the on-demand pool — spend stays $0 even if quota is exhausted</text>
-<text x="40" y="476" text-anchor="start" font-size="12" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">✗ cannot see vip-only models, cannot raise its own budget</text>
+<polygon points="36,15 47,26 36,37 25,26" fill="#2DD4BF"/>
+<text x="56" y="30" text-anchor="start" font-size="17" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">arouter</text>
+<text x="1136" y="30" text-anchor="end" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">alice · 2 of 5 tokens</text>
+<rect x="24" y="78" width="540" height="250" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="102" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">your api tokens</text>
+<text x="40" y="130" text-anchor="start" font-size="15" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">night-agent</text>
+<text x="240" y="130" text-anchor="start" font-size="13" fill="#8B949E" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">ark_••••••••••••••</text>
+<text x="40" y="154" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">grades A+..A · pools quota · models all</text>
+<text x="40" y="174" text-anchor="start" font-size="12" fill="#E3B341" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$2/day</text>
+<text x="540" y="130" text-anchor="end" font-size="11" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">revoke</text>
+<text x="40" y="222" text-anchor="start" font-size="15" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">ci-bot</text>
+<text x="240" y="222" text-anchor="start" font-size="13" fill="#8B949E" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">ark_••••••••••</text>
+<text x="40" y="246" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">grade B · pools local · models ollama/*</text>
+<text x="40" y="266" text-anchor="start" font-size="12" fill="#E3B341" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$0</text>
+<text x="540" y="222" text-anchor="end" font-size="11" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">revoke</text>
+<rect x="584" y="78" width="552" height="250" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="600" y="102" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">new token</text>
+<text x="600" y="130" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">name</text>
+<text x="1120" y="130" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">night-agent</text>
+<text x="600" y="156" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">grades</text>
+<text x="1120" y="156" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">A+ .. A</text>
+<text x="600" y="182" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">pools</text>
+<text x="1120" y="182" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">quota · local</text>
+<text x="600" y="208" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">models</text>
+<text x="1120" y="208" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">all except ollama/*</text>
+<text x="600" y="234" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">daily budget</text>
+<text x="1120" y="234" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$2.00</text>
+<rect x="600" y="254" width="120" height="30" rx="6" fill="#3FB950" opacity="0.2"/>
+<text x="660" y="274" text-anchor="middle" font-size="13" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">create</text>
+<rect x="24" y="344" width="1112" height="130" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="368" text-anchor="start" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">what this token can and cannot do</text>
+<text x="40" y="396" text-anchor="start" font-size="12" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">✓ reaches glm-5.3, glm-5.2, qwen3.8-flash — whichever is healthiest at request time</text>
+<text x="40" y="422" text-anchor="start" font-size="12" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">✗ can never reach the on-demand pool — spend stays $0 even if quota is exhausted</text>
+<text x="40" y="448" text-anchor="start" font-size="12" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">✗ cannot see vip-only models, cannot raise its own budget</text>
 </svg>

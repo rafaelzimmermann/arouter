@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 760" width="1160" height="760" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif"><rect x="0" y="0" width="1160" height="760" rx="16" fill="#0D1117"/>
+<polygon points="36,15 47,26 36,37 25,26" fill="#2DD4BF"/>
+<text x="56" y="30" text-anchor="start" font-size="17" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">arouter</text>
+<text x="1136" y="30" text-anchor="end" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">claim · step 2 of 2</text>
+<rect x="24" y="76" width="540" height="240" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="100" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">prove this machine owns the router</text>
+<text x="40" y="128" text-anchor="start" font-size="13" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">1 · link opened from localhost</text>
+<text x="40" y="156" text-anchor="start" font-size="#E6EDF3" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">2 · paste the code the daemon printed in your terminal</text>
+<rect x="40" y="176" width="240" height="36" rx="6" fill="#30363D" opacity="0.5"/>
+<text x="56" y="202" text-anchor="start" font-size="15" fill="#2DD4BF" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">8f2c71</text>
+<text x="40" y="232" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">the code is the second factor — the link alone grants nothing</text>
+<text x="40" y="260" text-anchor="start" font-size="#E3B341" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">3 wrong tries left before the claim expires</text>
+<rect x="584" y="76" width="552" height="240" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="600" y="100" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">name the owner</text>
+<text x="600" y="128" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">name</text>
+<text x="1120" y="128" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">alice</text>
+<text x="600" y="154" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">project</text>
+<text x="1120" y="154" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">home lab</text>
+<text x="600" y="180" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">role</text>
+<text x="1120" y="180" text-anchor="end" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">owner (only one per router)</text>
+<rect x="24" y="332" width="1112" height="200" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="356" text-anchor="start" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">the password — set here, never in the URL</text>
+<text x="40" y="384" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">· min 12 characters · no rules theatre, no expiry games</text>
+<text x="40" y="410" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">· typed into a form over the same origin · never a query string</text>
+<text x="40" y="436" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">· stored as argon2id in the managed overlay · file mode 0600</text>
+<text x="40" y="462" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">· nothing in the app, the logs or the config is ever plaintext</text>
+<rect x="40" y="460" width="300" height="34" rx="6" fill="#30363D" opacity="0.5"/>
+<text x="56" y="484" text-anchor="start" font-size="13" fill="#8B949E" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">••••••••••••</text>
+<text x="40" y="510" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">change it later at /settings · sessions stay valid until it rotates</text>
+<rect x="24" y="548" width="1112" height="120" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="572" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">what the claim grants the moment it succeeds</text>
+<text x="40" y="600" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">· you are the owner — the only role that can add users, tokens and rules</text>
+<text x="40" y="626" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">· a session starts immediately: no second login round-trip</text>
+<text x="40" y="652" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">· auth mode stays OFF by default: routing keeps working, management is now yours</text>
+</svg>

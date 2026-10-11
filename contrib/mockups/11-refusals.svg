@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 620" width="1160" height="620" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif"><rect x="0" y="0" width="1160" height="620" rx="16" fill="#0D1117"/>
+<polygon points="36,15 47,26 36,37 25,26" fill="#2DD4BF"/>
+<text x="56" y="30" text-anchor="start" font-size="17" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">arouter</text>
+<text x="1136" y="30" text-anchor="end" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">what a caller sees when we say no</text>
+<rect x="24" y="76" width="264" height="200" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="110" text-anchor="start" font-size="20" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">401</text>
+<text x="40" y="138" text-anchor="start" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">no valid token</text>
+<text x="40" y="168" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">arouter requires an api token on this network</text>
+<text x="40" y="198" text-anchor="start" font-size="11" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">create a token at /tokens</text>
+<text x="40" y="232" text-anchor="start" font-size="11" fill="#8B949E" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">Retry-After: 4620</text>
+<rect x="304" y="76" width="264" height="200" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="320" y="110" text-anchor="start" font-size="20" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">403</text>
+<text x="320" y="138" text-anchor="start" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">outside token scope</text>
+<text x="320" y="168" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">this token may not reach the on-demand pool</text>
+<text x="320" y="198" text-anchor="start" font-size="11" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">use a token that may, or lower the grade</text>
+<text x="320" y="232" text-anchor="start" font-size="11" fill="#8B949E" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">Retry-After: 4620</text>
+<rect x="584" y="76" width="264" height="200" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="600" y="110" text-anchor="start" font-size="20" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">402</text>
+<text x="600" y="138" text-anchor="start" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">budget spent</text>
+<text x="600" y="168" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">caller night-agent hit its $2/day cap</text>
+<text x="600" y="198" text-anchor="start" font-size="11" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">raise the cap, or wait for the window</text>
+<text x="600" y="232" text-anchor="start" font-size="11" fill="#8B949E" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">Retry-After: 4620</text>
+<rect x="864" y="76" width="264" height="200" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="880" y="110" text-anchor="start" font-size="20" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">403</text>
+<text x="880" y="138" text-anchor="start" font-size="13" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">model disabled</text>
+<text x="880" y="168" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">glm-5.3 is disabled by the owner</text>
+<text x="880" y="198" text-anchor="start" font-size="11" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">ask them, or pick another grade</text>
+<text x="880" y="232" text-anchor="start" font-size="11" fill="#8B949E" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">Retry-After: 4620</text>
+<rect x="24" y="292" width="1112" height="140" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="316" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">the refusal never names a provider</text>
+<text x="40" y="344" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">· the wire response says pool and grade — the upstream identity stays in the header and the monitor</text>
+<text x="40" y="370" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">· pi's UI keeps showing the grade: the caller learns it was refused, not who would have served it</text>
+</svg>
