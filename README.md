@@ -33,17 +33,20 @@ cargo build --release
 ./target/release/arouter serve --config config.example.toml   # daemon on 127.0.0.1:3929
 
 curl -s localhost:3929/v1/chat/completions \
-  -d '{"model":"A+","messages":[{"role":"user","content":"hi"}]}'
-curl -s localhost:3929/v1/models        # → A+, A, B …
+  -d '{"model":"arouter-subscription-A+","messages":[{"role":"user","content":"hi"}]}'
+curl -s localhost:3929/v1/models        # → arouter-subscription-A+, …
 ```
 
-Point any OpenAI-compatible client at `http://localhost:3929/v1` with model `A+`, `A` or `B`. Upstream accounts go in `~/.config/arouter/.env` (or the environment); edit `config.example.toml` for which models exist and at what grade. Anthropic-wire clients (Claude Code, `anthropic-messages`) work too — see below. pi users get providers wired automatically by `arouter init`.
+Point any OpenAI-compatible client at `http://localhost:3929/v1` with a
+group-grade model id (`arouter-subscription-A+` …) — see
+[Routing groups](#what-it-decides). Bare grade tokens (`A+`, `A`, `B`)
+remain the power-user shorthand for the URL's pool. Upstream accounts go in `~/.config/arouter/.env` (or the environment); edit `config.example.toml` for which models exist and at what grade. Anthropic-wire clients (Claude Code, `anthropic-messages`) work too — see below. pi users get providers wired automatically by `arouter init`.
 
 ## What it decides
 
 **Routing groups — the easy surface.** `/v1/models` lists one entry per group×grade (config-defined `[[groups]]` × the group ladder), defaults: `arouter-subscription-A+`, `arouter-subscription-A`, …, `arouter-local-*`, `arouter-ondemand-*` — one group per pool, subscription and on-demand falling back to local. Send `"model": "arouter-subscription-A+"` to pin that grade inside the group; the bare id (`"model": "arouter-subscription"`) delegates the whole ladder to the routing strategy, and a range like `arouter-subscription-A+..A` caps degradation. Groups can also list explicit members across providers with per-member grade overrides and their own ladder — everything is configuration.
 
-**Grades, pools, profiles.** You request `A+`, `A`, `B` — or a range like `"A+..A"` to cap degradation. Pools are hard boundaries: `/v1` = your subscriptions/quotas (default), `/local/v1` = local engines, `/ondemand/v1` = pay-per-token. Profiles add per-task overlays: `arouter-night-ondemand:A+` brings its own ladder, budgets and model visibility. Falling back from a free pool into a paid one is explicit opt-in (`cross_pool = ["ondemand"]`) and always labeled in the response. (Grade tokens and pool paths remain the power-user surface; groups are what clients see.)
+**Grades, pools, profiles.** You request `A+`, `A`, `B` — or a range like `"A+..A"` to cap degradation. Pools are hard boundaries: `/v1` = your subscriptions/quotas (default), `/local/v1` = local engines, `/ondemand/v1` = pay-per-token. Profiles add per-task overlays via the URL path (`/night/v1/...`): their own ladder, budgets and model visibility. Falling back from a free pool into a paid one is explicit opt-in (`cross_pool = ["ondemand"]`) and always labeled in the response. (Grade tokens and pool paths remain the power-user surface; groups are what clients see.)
 
 **Quota awareness.** arouter asks its upstreams for quota directly: the documented OpenRouter key endpoint by default, `x-ratelimit-*` headers harvested from the responses it already proxies (a 429 is ground truth — exhausted until its `Retry-After` says otherwise), an opt-in fetcher for z.ai coding plans, and hand-pinned windows for providers with no quota API at all. It then scores each provider: exhausted windows are skipped until their reset (arouter's own 429 carries a reset-aware `Retry-After`), scarce windows and too-fast burn rates are deprioritized, equally-healthy providers spread by remaining headroom. Windows resetting within 4h enter **drain mode** — penalties lift and ties resolve toward the soonest reset, so expiring quota gets spent instead of wasted. Live numbers: `/status.json` and the `arouter_quota_*` gauges.
 
@@ -165,7 +168,7 @@ Claude Code and `anthropic-messages` clients use the same grades and pools:
 ```sh
 curl http://127.0.0.1:3929/v1/messages -H 'content-type: application/json' \
   -H "x-api-key: $AROUTER_KEY" \
-  -d '{"model":"A","max_tokens":512,"messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"arouter-subscription-A","max_tokens":512,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
 ## Codex subscription models (E7)
