@@ -156,6 +156,10 @@ pub struct ProviderState {
     /// the source says these numbers are the last good ones, not live.
     pub stale: bool,
     pub windows: Vec<QuotaWindow>,
+    /// E10c: a manual quota override holds this provider until
+    /// `expires_at` (unix) or a fresher native/harvest sample replaces
+    /// it. `None` = no override in force.
+    pub manual_until: Option<u64>,
     /// Last per-provider update (native fetch / header harvest).
     /// `None` for whole-snapshot (command) sources → fall back to
     /// snapshot age for staleness.
@@ -205,6 +209,7 @@ impl QuotaState {
                     stale: p.stale.unwrap_or(false),
                     windows,
                     updated_unix: None,
+                    manual_until: None,
                 },
             );
         }
@@ -462,6 +467,7 @@ impl QuotaWatcher {
             .entry(provider.to_string())
             .or_insert_with(|| ProviderState {
                 panel: provider.to_string(),
+                manual_until: None,
                 error: None,
                 stale: false,
                 windows: vec![],
@@ -471,8 +477,71 @@ impl QuotaWatcher {
         entry.error = None;
         entry.stale = false;
         entry.updated_unix = Some(now);
+        // a fresh native sample legitimately supersedes a manual
+        // override (PLAN.md: a stale override never dominates fresh
+        // native data)
+        entry.manual_until = None;
         qs.fetched_unix = Some(qs.fetched_unix.map_or(now, |t| t.max(now)));
         self.set(qs);
+    }
+
+    /// E10c: merge a manual quota override as a synthetic `manual`
+    /// sample (PLAN.md). Like [`apply`](Self::apply) but the windows
+    /// are held only until `expires_at`; `updated_unix` records
+    /// `set_at` so a snapshot fetched between `set_at` and now does
+    /// not erase the override, while anything genuinely newer does.
+    pub fn apply_manual(
+        &self,
+        provider: &str,
+        windows: Vec<QuotaWindow>,
+        set_at: u64,
+        expires_at: u64,
+    ) {
+        let current = self.current();
+        let mut qs = QuotaState::clone(&current);
+        let entry = qs
+            .providers
+            .entry(provider.to_string())
+            .or_insert_with(|| ProviderState {
+                panel: provider.to_string(),
+                error: None,
+                stale: false,
+                windows: vec![],
+                updated_unix: None,
+                manual_until: None,
+            });
+        // never go backwards: a fresher native sample wins over an
+        // older override replayed at startup
+        if entry.updated_unix.is_some_and(|t| t > set_at) {
+            return;
+        }
+        entry.windows = windows;
+        entry.error = None;
+        entry.stale = false;
+        entry.updated_unix = Some(set_at);
+        entry.manual_until = Some(expires_at);
+        qs.fetched_unix = Some(qs.fetched_unix.map_or(set_at, |t| t.max(set_at)));
+        self.set(qs);
+    }
+
+    /// E10c: expire overrides whose time is up — their windows go
+    /// stale (existing stale penalties apply until the next native
+    /// fetch refreshes them). Returns the panels that expired.
+    pub fn expire_manual(&self, now: u64) -> Vec<String> {
+        let current = self.current();
+        let mut qs = QuotaState::clone(&current);
+        let mut expired = vec![];
+        for (name, entry) in qs.providers.iter_mut() {
+            if entry.manual_until.is_some_and(|t| t <= now) {
+                entry.manual_until = None;
+                entry.stale = true;
+                expired.push(name.clone());
+            }
+        }
+        if !expired.is_empty() {
+            self.set(qs);
+        }
+        expired
     }
 
     /// Whole-snapshot swap for the legacy command watcher — but a
@@ -814,6 +883,7 @@ mod tests {
             error: None,
             stale: false,
             updated_unix: None,
+            manual_until: None,
             windows: pcts_resets
                 .iter()
                 .enumerate()
@@ -1293,4 +1363,87 @@ mod tests {
         let retry = nearest_retry_unix(&quota, &ProviderMap::default(), &[&m1, &m2]);
         assert_eq!(retry, Some(now + 600 - RESET_SAFETY_SECS));
     }
+}
+
+#[test]
+fn manual_override_holds_then_expires_stale() {
+    let w = QuotaWatcher::default();
+    let now = unix_now();
+    // no override in force
+    assert!(w.expire_manual(now).is_empty());
+
+    w.apply_manual(
+        "z.ai",
+        vec![QuotaWindow {
+            label: "5h".into(),
+            pct: 0.5,
+            reset_unix: None,
+            pace: None,
+        }],
+        now,
+        now + 3600,
+    );
+    let ps = w.current().providers.get("z.ai").unwrap().clone();
+    assert_eq!(ps.windows.len(), 1);
+    assert!(!ps.stale);
+    assert_eq!(ps.manual_until, Some(now + 3600));
+
+    // before expiry: nothing to do
+    assert!(w.expire_manual(now + 3599).is_empty());
+    // after expiry: marked stale, override flag cleared
+    let expired = w.expire_manual(now + 3601);
+    assert_eq!(expired, vec!["z.ai".to_string()]);
+    let ps = w.current().providers.get("z.ai").unwrap().clone();
+    assert!(ps.stale);
+    assert_eq!(ps.manual_until, None);
+    // windows kept (stale penalties apply) until a native fetch replaces them
+    assert_eq!(ps.windows.len(), 1);
+}
+
+#[test]
+fn native_fetch_supersedes_manual_override() {
+    let w = QuotaWatcher::default();
+    let now = unix_now();
+    w.apply_manual(
+        "z.ai",
+        vec![QuotaWindow {
+            label: "5h".into(),
+            pct: 0.5,
+            reset_unix: None,
+            pace: None,
+        }],
+        now,
+        now + 3600,
+    );
+    // a fresher native apply clears the override
+    w.apply(
+        "z.ai",
+        vec![QuotaWindow {
+            label: "5h".into(),
+            pct: 0.9,
+            reset_unix: None,
+            pace: None,
+        }],
+        now + 10,
+    );
+    let ps = w.current().providers.get("z.ai").unwrap().clone();
+    assert_eq!(ps.manual_until, None);
+    assert_eq!(ps.windows[0].pct, 0.9);
+    assert!(!ps.stale);
+
+    // and an older override replay (e.g. at startup) never wins
+    w.apply_manual(
+        "z.ai",
+        vec![QuotaWindow {
+            label: "5h".into(),
+            pct: 0.1,
+            reset_unix: None,
+            pace: None,
+        }],
+        now, // older than the native sample at now+10
+        now + 3600,
+    );
+    let ps = w.current().providers.get("z.ai").unwrap().clone();
+    assert_eq!(ps.windows[0].pct, 0.9, "stale override never dominates");
+    assert_eq!(ps.manual_until, None);
 }

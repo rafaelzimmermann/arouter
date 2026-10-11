@@ -16,6 +16,7 @@ pub mod init;
 pub mod localeng;
 pub mod metrics;
 pub mod monitor;
+pub mod overlay;
 pub mod proxy;
 pub mod quota;
 pub mod quotaeng;

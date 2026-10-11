@@ -235,6 +235,7 @@ async fn serve(
                 .map_err(|e| anyhow::anyhow!("startup: {e}"))?,
         ))),
         config_path: config.map(|p| p.to_path_buf()),
+        state_dir: std::path::PathBuf::from(&cfg.server.state_dir),
         http: proxy::client(&TimeoutsConfig::poll()),
         discovery_interval_secs: cfg.routing.discovery_interval_secs,
     };
@@ -374,7 +375,46 @@ async fn serve(
         started: Instant::now(),
         web: web.clone(),
         tokens,
+        overlay_dir: std::path::PathBuf::from(&cfg.server.state_dir),
+        keys: Arc::new(keys.clone()),
     };
+
+    // E10c: replay persisted quota overrides (unexpired ones only — a
+    // stale override never dominates fresher native data), then keep
+    // expiring them in the background.
+    {
+        let (overlay, _) =
+            arouter::overlay::Overlay::load(std::path::Path::new(&cfg.server.state_dir));
+        let now = arouter::quota::unix_now();
+        for o in &overlay.quota {
+            if o.expires_at > now {
+                state.quota.apply_manual(
+                    &o.provider,
+                    vec![arouter::quota::QuotaWindow {
+                        label: o.label.clone(),
+                        pct: o.pct,
+                        reset_unix: o.reset_unix,
+                        pace: None,
+                    }],
+                    o.set_at,
+                    o.expires_at,
+                );
+            }
+        }
+    }
+    {
+        let quota = state.quota.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(30));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                for panel in quota.expire_manual(arouter::quota::unix_now()) {
+                    tracing::info!(panel, "quota override expired — windows now stale");
+                }
+            }
+        });
+    }
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     print_banner(&bind, registry.models.len());
@@ -455,6 +495,9 @@ struct Reloader {
     /// Whole immutable snapshot — swapped atomically (review F6)
     shared: Arc<RwLock<Arc<proxy::Runtime>>>,
     config_path: Option<PathBuf>,
+    /// E10c: where `web.toml` lives — applied after the discovery
+    /// merge on every reload and watched for mtime changes.
+    state_dir: PathBuf,
     http: reqwest::Client,
     discovery_interval_secs: u64,
 }
@@ -486,9 +529,13 @@ impl Reloader {
             Vec::new()
         };
         let merged = discover::merge_discovered(&cfg, &discovered, &auto, &catalog);
+        // E10c: the overlay is applied INSIDE build_with_overlay — manual
+        // config > overlay > discovered, merged per field (see overlay.rs).
+        // Rejected entries surface in /status.json; the rest still applies.
+        let (overlay, load_errors) = arouter::overlay::Overlay::load(&self.state_dir);
         // review F6: registry + callers + budgets + policy swap as ONE
         // immutable snapshot — a request in flight keeps its generation
-        match proxy::Runtime::build(merged, &keys) {
+        match proxy::Runtime::build_with_overlay(merged, &keys, &overlay, load_errors) {
             Ok(rt) => {
                 let n = rt.registry.models.len();
                 let manual = rt
@@ -524,8 +571,13 @@ async fn reload_loop(r: Reloader) {
     let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         .expect("install SIGHUP handler");
     let mut last_mtime = file_mtime(&r.config_path);
-    // single 5s heartbeat: config-mtime + discovery schedule. The bind
-    // address is fixed at startup; everything else hot-reloads.
+    // E10c: web.toml (overlay) is watched like the config — the web
+    // write endpoints also rebuild immediately, this catches hand
+    // edits and races
+    let mut last_overlay_mtime = file_mtime(&Some(arouter::overlay::path_for(&r.state_dir)));
+    // single 5s heartbeat: config-mtime + overlay-mtime + discovery
+    // schedule. The bind address is fixed at startup; everything else
+    // hot-reloads.
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let discovery = if r.discovery_interval_secs > 0 {
@@ -551,6 +603,11 @@ async fn reload_loop(r: Reloader) {
                         last_mtime = m;
                         r.reload("config changed").await;
                     }
+                    let om = file_mtime(&Some(arouter::overlay::path_for(&r.state_dir)));
+                    if om != last_overlay_mtime {
+                        last_overlay_mtime = om;
+                        r.reload("overlay changed").await;
+                    }
                 }
                 _ = async { discovery.as_mut().expect("checked Some").tick().await }, if discovery.is_some() => {
                     r.reload("discovery poll").await;
@@ -564,6 +621,11 @@ async fn reload_loop(r: Reloader) {
             if m != last_mtime {
                 last_mtime = m;
                 r.reload("config changed").await;
+            }
+            let om = file_mtime(&Some(arouter::overlay::path_for(&r.state_dir)));
+            if om != last_overlay_mtime {
+                last_overlay_mtime = om;
+                r.reload("overlay changed").await;
             }
         }
     }

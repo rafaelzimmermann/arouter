@@ -562,6 +562,380 @@ fn bad_request(msg: String) -> Response {
     api_error(StatusCode::BAD_REQUEST, "invalid_request", &msg)
 }
 
+// ─────────────────── E10c: overlay management ───────────────────
+
+/// `GET /api/models` — the routed model set + overlay diagnostics +
+/// the persisted quota overrides (for the management panel).
+pub async fn api_models(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(resp) = admin_gate(&st, &headers, false) {
+        return *resp;
+    }
+    let rt = st.runtime();
+    let reg = &rt.registry;
+    let mut models: Vec<serde_json::Value> = reg
+        .models
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "id": m.id,
+                "grade": reg.ladder.token(m.grade_rank),
+                "pools": m.pools,
+                "weight": m.weight,
+                "provenance": m.provenance,
+                "wire": m.wire,
+                "disabled": false,
+            })
+        })
+        .collect();
+    for id in &rt.overlay.disabled {
+        models.push(serde_json::json!({
+            "id": id,
+            "grade": "",
+            "pools": [],
+            "weight": 0.0,
+            "provenance": "hidden",
+            "wire": "",
+            "disabled": true,
+        }));
+    }
+    let (overlay, load_errors) = crate::overlay::Overlay::load(&st.overlay_dir);
+    let now = crate::quota::unix_now();
+    let overrides: Vec<serde_json::Value> = overlay
+        .quota
+        .iter()
+        .map(|o| {
+            serde_json::json!({
+                "provider": o.provider,
+                "label": o.label,
+                "pct": o.pct,
+                "reset_unix": o.reset_unix,
+                "set_at": o.set_at,
+                "set_by": o.set_by,
+                "expires_at": o.expires_at,
+                "active": o.expires_at > now,
+            })
+        })
+        .collect();
+    let q = st.quota.current();
+    let panels: Vec<String> = q.providers.keys().cloned().collect();
+    Json(serde_json::json!({
+        "models": models,
+        "overlay": {
+            "disabled": rt.overlay.disabled,
+            "errors": rt.overlay.errors,
+            "load_errors": load_errors,
+        },
+        "quota_panels": panels,
+        "quota_overrides": overrides,
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct ModelStateBody {
+    id: String,
+    #[serde(default)]
+    disabled: Option<bool>,
+    #[serde(default)]
+    weight: Option<f64>,
+}
+
+/// Load the overlay, mutate one entry, prune no-ops, dry-run, save,
+/// rebuild. Shared tail of the models write endpoints.
+fn overlay_write(st: &AppState, overlay: crate::overlay::Overlay) -> Response {
+    // dry-run BEFORE saving: a rejected write leaves the previous
+    // snapshot serving (PLAN.md)
+    let rt = st.runtime();
+    let diag = overlay.dry_run(&rt.cfg);
+    if !diag.errors.is_empty() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "overlay_rejected",
+            &diag.errors.join("; "),
+        );
+    }
+    if let Err(e) = overlay.save(&st.overlay_dir) {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "overlay_write_failed",
+            &format!(
+                "{}: {e}",
+                crate::overlay::path_for(&st.overlay_dir).display()
+            ),
+        );
+    }
+    drop(rt);
+    if !crate::proxy::rebuild_now(st, "overlay write") {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "overlay_rejected",
+            "merged config invalid — previous snapshot still serving",
+        );
+    }
+    let rt = st.runtime();
+    Json(serde_json::json!({
+        "ok": true,
+        "disabled": rt.overlay.disabled,
+        "errors": rt.overlay.errors,
+    }))
+    .into_response()
+}
+
+/// `POST /api/models/state` — flip `disabled` / set `weight` for an
+/// existing (manual, discovered or overlay) model.
+pub async fn api_models_state(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Err(resp) = admin_gate(&st, &headers, true) {
+        return *resp;
+    }
+    let parsed: ModelStateBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => return bad_request(format!("invalid json: {e}")),
+    };
+    if parsed.disabled.is_none() && parsed.weight.is_none() {
+        return bad_request("nothing to change: set disabled and/or weight".into());
+    }
+    if let Some(w) = parsed.weight {
+        if !(w.is_finite() && w > 0.0) {
+            return bad_request("weight must be > 0".into());
+        }
+    }
+    let rt = st.runtime();
+    let known = rt.registry.models.iter().any(|m| m.id == parsed.id)
+        || rt.overlay.disabled.contains(&parsed.id);
+    if !known {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "unknown_model",
+            &format!(
+                "no model {:?} — additions go through /api/models/add",
+                parsed.id
+            ),
+        );
+    }
+    drop(rt);
+    let (mut overlay, _) = crate::overlay::Overlay::load(&st.overlay_dir);
+    let entry = match overlay.models.iter_mut().find(|e| e.id == parsed.id) {
+        Some(e) => e,
+        None => {
+            overlay.models.push(crate::overlay::OverlayModel {
+                id: parsed.id.clone(),
+                ..Default::default()
+            });
+            overlay.models.last_mut().expect("just pushed")
+        }
+    };
+    if let Some(d) = parsed.disabled {
+        entry.disabled = d;
+    }
+    if let Some(w) = parsed.weight {
+        entry.weight = Some(w);
+    }
+    // prune no-op entries so web.toml stays readable
+    if !entry.disabled && entry.weight.is_none() && !entry.structure_fields_set() {
+        overlay.models.retain(|e| e.id != parsed.id);
+    }
+    overlay_write(&st, overlay)
+}
+
+#[derive(Deserialize)]
+struct ModelAddBody {
+    id: String,
+    base_url: String,
+    grade: String,
+    #[serde(default)]
+    pool: Option<Vec<String>>,
+    #[serde(default)]
+    context: Option<u64>,
+    #[serde(default)]
+    auth: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    cost_in: Option<f64>,
+    #[serde(default)]
+    cost_out: Option<f64>,
+    #[serde(default)]
+    weight: Option<f64>,
+}
+
+/// `POST /api/models/add` — an overlay ADDITION (id unknown to manual
+/// config and discovery); must carry base_url + grade.
+pub async fn api_models_add(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Err(resp) = admin_gate(&st, &headers, true) {
+        return *resp;
+    }
+    let parsed: ModelAddBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => return bad_request(format!("invalid json: {e}")),
+    };
+    let rt = st.runtime();
+    if rt.registry.models.iter().any(|m| m.id == parsed.id)
+        || rt.overlay.disabled.contains(&parsed.id)
+    {
+        return bad_request(format!(
+            "model {:?} already exists — use /api/models/state for disabled/weight",
+            parsed.id
+        ));
+    }
+    if let Some(w) = parsed.weight {
+        if !(w.is_finite() && w > 0.0) {
+            return bad_request("weight must be > 0".into());
+        }
+    }
+    drop(rt);
+    let (mut overlay, _) = crate::overlay::Overlay::load(&st.overlay_dir);
+    if overlay.models.iter().any(|e| e.id == parsed.id) {
+        return bad_request(format!("overlay already has an entry for {:?}", parsed.id));
+    }
+    overlay.models.push(crate::overlay::OverlayModel {
+        id: parsed.id,
+        base_url: Some(parsed.base_url),
+        grade: Some(parsed.grade),
+        pool: parsed.pool,
+        context: parsed.context,
+        auth: parsed.auth,
+        name: parsed.name,
+        cost_in: parsed.cost_in,
+        cost_out: parsed.cost_out,
+        weight: parsed.weight,
+        disabled: false,
+    });
+    overlay_write(&st, overlay)
+}
+
+/// `POST /api/models/remove` — drop an overlay ADDITION. Manual and
+/// discovered models can be disabled but never removed from here.
+pub async fn api_models_remove(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Err(resp) = admin_gate(&st, &headers, true) {
+        return *resp;
+    }
+    #[derive(Deserialize)]
+    struct RemoveBody {
+        id: String,
+    }
+    let parsed: RemoveBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => return bad_request(format!("invalid json: {e}")),
+    };
+    let rt = st.runtime();
+    let is_addition = rt
+        .cfg
+        .models
+        .iter()
+        .any(|m| m.id == parsed.id && m.provenance == "overlay");
+    let hidden_addition = !is_addition && {
+        // a born-disabled addition never entered the registry; it is
+        // removable iff it is not a manual/discovered model id
+        !rt.cfg.models.iter().any(|m| m.id == parsed.id) && rt.overlay.disabled.contains(&parsed.id)
+    };
+    if !is_addition && !hidden_addition {
+        return bad_request(format!(
+            "{:?} is manual/discovered — disable it instead; only overlay additions can be removed",
+            parsed.id
+        ));
+    }
+    drop(rt);
+    let (mut overlay, _) = crate::overlay::Overlay::load(&st.overlay_dir);
+    let before = overlay.models.len();
+    overlay.models.retain(|e| e.id != parsed.id);
+    if overlay.models.len() == before {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "unknown_model",
+            &format!("no overlay entry for {:?}", parsed.id),
+        );
+    }
+    overlay_write(&st, overlay)
+}
+
+#[derive(Deserialize)]
+struct QuotaOverrideBody {
+    provider: String,
+    label: String,
+    /// remaining fraction 0..=1
+    pct: f64,
+    #[serde(default)]
+    reset_in_secs: Option<u64>,
+    #[serde(default)]
+    ttl_secs: Option<u64>,
+}
+
+/// `POST /api/quota/override` — synthetic `manual` quota sample with
+/// `set_at`/`set_by`/`expires_at`; replaces the same provider+label
+/// override and applies immediately. A fresher native fetch supersedes
+/// it; expiry degrades it to stale.
+pub async fn api_quota_override(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Err(resp) = admin_gate(&st, &headers, true) {
+        return *resp;
+    }
+    let parsed: QuotaOverrideBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => return bad_request(format!("invalid json: {e}")),
+    };
+    if parsed.provider.trim().is_empty() || parsed.label.trim().is_empty() {
+        return bad_request("provider and label must not be empty".into());
+    }
+    if !(parsed.pct.is_finite() && (0.0..=1.0).contains(&parsed.pct)) {
+        return bad_request("pct must be within 0..=1".into());
+    }
+    let now = crate::quota::unix_now();
+    let expires_at = now + crate::overlay::clamp_ttl(parsed.ttl_secs);
+    let (mut overlay, _) = crate::overlay::Overlay::load(&st.overlay_dir);
+    overlay
+        .quota
+        .retain(|o| !(o.provider == parsed.provider && o.label == parsed.label));
+    overlay.quota.push(crate::overlay::QuotaOverride {
+        provider: parsed.provider.trim().to_string(),
+        label: parsed.label.trim().to_string(),
+        pct: parsed.pct,
+        reset_unix: parsed.reset_in_secs.map(|s| now + s),
+        set_at: now,
+        set_by: "admin-session".into(),
+        expires_at,
+    });
+    // quota overrides are validated trivially (above); reuse the
+    // atomic save but skip the model dry-run tail
+    if let Err(e) = overlay.save(&st.overlay_dir) {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "overlay_write_failed",
+            &format!(
+                "{}: {e}",
+                crate::overlay::path_for(&st.overlay_dir).display()
+            ),
+        );
+    }
+    let o = overlay.quota.last().expect("just pushed");
+    st.quota.apply_manual(
+        &o.provider,
+        vec![crate::quota::QuotaWindow {
+            label: o.label.clone(),
+            pct: o.pct,
+            reset_unix: o.reset_unix,
+            pace: None,
+        }],
+        o.set_at,
+        o.expires_at,
+    );
+    Json(serde_json::json!({ "ok": true, "expires_at": o.expires_at })).into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

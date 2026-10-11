@@ -700,6 +700,7 @@ mod tests {
                 stale: false,
                 windows: vec![win("old", 90.0, None)],
                 updated_unix: None,
+                manual_until: None,
             },
         );
         let w = QuotaWatcher::new(qs);
@@ -754,6 +755,7 @@ mod tests {
             stale: false,
             windows: vec![w],
             updated_unix: Some(now),
+            manual_until: None,
         };
         let a = crate::quota::provider_availability(Some(&p), false, now);
         assert_eq!(a.score, 0.0);
@@ -869,6 +871,7 @@ mod tests {
                         pace: None,
                     }],
                     updated_unix: None,
+                    manual_until: None,
                 },
             )]),
             stale_after_secs: 0,
@@ -897,6 +900,7 @@ mod tests {
                         pace: None,
                     }],
                     updated_unix: None,
+                    manual_until: None,
                 },
             )]),
             stale_after_secs: 0,

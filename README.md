@@ -130,6 +130,34 @@ enabled = true
 session_ttl_hours = 12
 ```
 
+### Managing models & quotas (E10c)
+
+The dashboard's **models** panel drives the running router without a
+restart. Changes land in an overlay (`web.toml` in the state dir —
+atomic write, `0600`, picked up from hand edits within 5s) and are
+re-applied on every reload, so they survive discovery polls:
+
+- **disable / re-enable** a model — it leaves the routing set
+  immediately and is never contacted (status.json lists it under
+  `overlay.disabled`)
+- **weight** — the within-grade sharing weight
+- **add** a model (id, base_url, grade, optional pool/auth) — enters
+  routing with provenance `overlay`; `ondemand` additions must carry
+  costs (fail-closed, F3) and can be **removed** again. Manual and
+  discovered models can be disabled but never removed from the web.
+
+Structure (base_url, grade, pool, auth, costs, context, name) stays
+manual-only — an overlay entry that tries to edit it is rejected per
+entry and shows up in `/status.json` under `overlay.errors`. A
+rejected write keeps the previous snapshot serving.
+
+**Quota overrides** set synthetic `manual` samples for providers
+without native quota: pick provider + window label, remaining
+fraction, optional reset countdown and TTL (default 24h, max 7d).
+Fresher native data supersedes an override; expiry degrades its
+windows to stale. Overrides are re-applied at startup while
+unexpired.
+
 ## Anthropic-wire clients
 
 Claude Code and `anthropic-messages` clients use the same grades and pools:

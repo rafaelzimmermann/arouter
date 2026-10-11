@@ -153,6 +153,8 @@ struct TestApp {
     web: Arc<arouter::web::Web>,
     /// E10b api tokens (scope/revocation tests)
     tokens: Arc<arouter::tokens::TokenStore>,
+    /// E10c overlay dir (web.toml) for direct file manipulation
+    overlay_dir: std::path::PathBuf,
 }
 
 fn test_app(cfg: Config) -> TestApp {
@@ -197,6 +199,8 @@ fn test_app_health_quota(cfg: Config, policy: HealthPolicy, quota_state: QuotaSt
         started: Instant::now(),
         web: web.clone(),
         tokens: tokens.clone(),
+        overlay_dir: dir.to_path_buf(),
+        keys: Arc::new(arouter::config::KeyStore::default()),
     };
     TestApp {
         app: proxy::router(state),
@@ -209,6 +213,7 @@ fn test_app_health_quota(cfg: Config, policy: HealthPolicy, quota_state: QuotaSt
         runtime,
         web,
         tokens,
+        overlay_dir: dir.clone(),
     }
 }
 
@@ -967,6 +972,482 @@ async fn tokens_enforced_when_auth_required() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
+// ─────────────────── E10c: overlay management ───────────────────
+
+/// Session + same-origin headers for the admin write endpoints.
+fn admin_headers(t: &TestApp) -> HeaderMap {
+    let sid = t.web.mint_session("admin", arouter::quota::unix_now());
+    let mut h = HeaderMap::new();
+    h.insert(
+        header::COOKIE,
+        format!("arouter_sid={sid}").parse().unwrap(),
+    );
+    h.insert(header::ORIGIN, "http://127.0.0.1:3929".parse().unwrap());
+    h.insert(header::HOST, "127.0.0.1:3929".parse().unwrap());
+    h
+}
+
+async fn post_json(app: &Router, path: &str, h: &HeaderMap, body: serde_json::Value) -> Response {
+    let mut req = Request::post(path)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    for (k, v) in h {
+        req.headers_mut().insert(k, v.clone());
+    }
+    app.clone().oneshot(req).await.unwrap()
+}
+
+async fn status_json(t: &TestApp) -> serde_json::Value {
+    let resp = web_get(&t.app, "/status.json", HeaderMap::new()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    serde_json::from_str(&body_string(resp).await).unwrap()
+}
+
+#[tokio::test]
+async fn overlay_disable_never_contacts_then_reenables() {
+    let (a_up, a_hits) = counting_good().await;
+    let (b_up, b_hits) = counting_good().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![
+        model("zai/glm-5.3", "A", &["quota"], &a_up, 1.0, (0.0, 0.0)),
+        model("deepseek/v4.x", "B", &["quota"], &b_up, 1.0, (0.0, 0.0)),
+    ];
+    let t = test_app(cfg);
+    let h = admin_headers(&t);
+
+    // serve once through A to prove it works
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-subscription-A",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(a_hits.load(Ordering::SeqCst), 1);
+
+    // disable A via the overlay
+    let resp = post_json(
+        &t.app,
+        "/api/models/state",
+        &h,
+        serde_json::json!({"id": "zai/glm-5.3", "disabled": true}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "{}", body_string(resp).await);
+
+    // whole-ladder request now serves via B — A is never contacted
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-subscription",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(hstr(&resp, "x-arouter-upstream"), "deepseek/v4.x");
+    assert_eq!(
+        a_hits.load(Ordering::SeqCst),
+        1,
+        "disabled model never contacted"
+    );
+    assert_eq!(b_hits.load(Ordering::SeqCst), 1);
+
+    // status.json reports what the overlay hid
+    let s = status_json(&t).await;
+    assert_eq!(
+        s["overlay"]["disabled"],
+        serde_json::json!(["zai/glm-5.3"]),
+        "{}",
+        s["overlay"]
+    );
+    assert_eq!(s["overlay"]["errors"], serde_json::json!([]));
+
+    // requesting the disabled grade falls down the ladder to B — the
+    // disabled upstream is still never contacted
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-subscription-A",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(hstr(&resp, "x-arouter-upstream"), "deepseek/v4.x");
+    assert_eq!(a_hits.load(Ordering::SeqCst), 1);
+
+    // re-enable: the no-op overlay entry is pruned, A serves again
+    let resp = post_json(
+        &t.app,
+        "/api/models/state",
+        &h,
+        serde_json::json!({"id": "zai/glm-5.3", "disabled": false}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-subscription-A",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(a_hits.load(Ordering::SeqCst), 2);
+    // and the overlay file exists with 0600 perms and no model entries
+    let path = t.overlay_dir.join("web.toml");
+    assert!(path.exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    assert!(!std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("zai/glm-5.3"));
+}
+
+#[tokio::test]
+async fn overlay_weight_switch_lands() {
+    let up = good_json().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![model("zai/glm-5.3", "A", &["quota"], &up, 1.0, (0.0, 0.0))];
+    let t = test_app(cfg);
+    let h = admin_headers(&t);
+
+    let resp = post_json(
+        &t.app,
+        "/api/models/state",
+        &h,
+        serde_json::json!({"id": "zai/glm-5.3", "weight": 2.5}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // the management listing reflects the overlay weight; routing still serves
+    let resp = web_get(&t.app, "/api/models", h.clone()).await;
+    let body: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    let m = &body["models"][0];
+    assert_eq!(m["id"], "zai/glm-5.3");
+    assert_eq!(m["weight"], 2.5);
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-subscription-A",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // invalid weight is rejected before writing
+    let resp = post_json(
+        &t.app,
+        "/api/models/state",
+        &h,
+        serde_json::json!({"id": "zai/glm-5.3", "weight": 0.0}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn overlay_addition_serves_and_removes() {
+    let (up, hits) = counting_good().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![model("zai/glm-5.3", "A", &["quota"], &up, 1.0, (0.0, 0.0))];
+    let t = test_app(cfg);
+    let h = admin_headers(&t);
+
+    // the addition must not collide with an existing id
+    let resp = post_json(
+        &t.app,
+        "/api/models/add",
+        &h,
+        serde_json::json!({"id": "zai/glm-5.3", "base_url": up, "grade": "B"}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let resp = post_json(
+        &t.app,
+        "/api/models/add",
+        &h,
+        serde_json::json!({
+            "id": "own/gpt-x",
+            "base_url": up,
+            "grade": "B",
+            "pool": ["quota"],
+            "auth": "none",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "{}", body_string(resp).await);
+
+    // served like any other candidate, provenance overlay
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-subscription-B",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(hstr(&resp, "x-arouter-upstream"), "own/gpt-x");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    let body = {
+        let resp = web_get(&t.app, "/api/models", h.clone()).await;
+        serde_json::from_str::<serde_json::Value>(&body_string(resp).await).unwrap()
+    };
+    let own = body["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "own/gpt-x")
+        .expect("addition listed");
+    assert_eq!(own["provenance"], "overlay");
+
+    // manual models cannot be removed — only the addition can
+    let resp = post_json(
+        &t.app,
+        "/api/models/remove",
+        &h,
+        serde_json::json!({"id": "zai/glm-5.3"}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let resp = post_json(
+        &t.app,
+        "/api/models/remove",
+        &h,
+        serde_json::json!({"id": "own/gpt-x"}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    // the addition is gone — no B candidate exists in the group, the
+    // fallback pools are empty, and the added upstream is never
+    // contacted again (429 arouter_exhausted, not a silent A serve)
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-subscription-B",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body = body_string(resp).await;
+    assert!(body.contains("arouter_exhausted"), "{body}");
+    assert_eq!(hits.load(Ordering::SeqCst), 1, "no further contacts");
+}
+
+#[tokio::test]
+async fn overlay_rejected_writes_keep_serving() {
+    let up = good_json().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![model("zai/glm-5.3", "A", &["quota"], &up, 1.0, (0.0, 0.0))];
+    let t = test_app(cfg);
+    let h = admin_headers(&t);
+
+    // unknown grade → dry-run rejects, nothing is written
+    let resp = post_json(
+        &t.app,
+        "/api/models/add",
+        &h,
+        serde_json::json!({"id": "own/gpt-x", "base_url": up, "grade": "Z9"}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(body_string(resp).await.contains("ladder"));
+    assert!(!t.overlay_dir.join("web.toml").exists(), "no file written");
+
+    // state change on an unknown id → 404
+    let resp = post_json(
+        &t.app,
+        "/api/models/state",
+        &h,
+        serde_json::json!({"id": "ghost/m", "disabled": true}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // same-origin but no session → 401 (origin gate passes first)
+    let mut no_session = h.clone();
+    no_session.remove(header::COOKIE);
+    let resp = post_json(
+        &t.app,
+        "/api/models/state",
+        &no_session,
+        serde_json::json!({"id": "zai/glm-5.3", "disabled": true}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    // bare request (no Origin proof at all) → 403 before the session check
+    let resp = post_json(
+        &t.app,
+        "/api/models/state",
+        &HeaderMap::new(),
+        serde_json::json!({"id": "zai/glm-5.3", "disabled": true}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let mut evil = h.clone();
+    evil.insert(header::ORIGIN, "http://evil.example".parse().unwrap());
+    let resp = post_json(
+        &t.app,
+        "/api/models/state",
+        &evil,
+        serde_json::json!({"id": "zai/glm-5.3", "disabled": true}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // serving is untouched by all the rejected writes
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-subscription-A",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn hand_edited_overlay_rejects_structure_edits_but_applies_rest() {
+    let (up, hits) = counting_good().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![
+        model("zai/glm-5.3", "A", &["quota"], &up, 1.0, (0.0, 0.0)),
+        model("deepseek/v4.x", "B", &["quota"], &up, 1.0, (0.0, 0.0)),
+    ];
+    let t = test_app(cfg);
+    let h = admin_headers(&t);
+
+    // a hand-edited overlay that tries to repoint a manual model at
+    // another host AND legitimately disables a second model
+    std::fs::write(
+        t.overlay_dir.join("web.toml"),
+        "[[models]]\nid = \"zai/glm-5.3\"\ndisabled = false\n\
+             base_url = \"http://evil.example:9/v1\"\n\n\
+             [[models]]\nid = \"deepseek/v4.x\"\ndisabled = true\n",
+    )
+    .unwrap();
+
+    // the whole-file dry-run rejects the write — a poisoned overlay
+    // blocks management writes until it is fixed (loud, not silent)
+    let resp = post_json(
+        &t.app,
+        "/api/models/state",
+        &h,
+        serde_json::json!({"id": "zai/glm-5.3", "weight": 2.0}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let err = body_string(resp).await;
+    assert!(err.contains("manual-only"), "{err}");
+    // the rejected write left the file untouched
+    let raw = std::fs::read_to_string(t.overlay_dir.join("web.toml")).unwrap();
+    assert!(
+        raw.contains("evil.example"),
+        "file unchanged by the rejected write"
+    );
+
+    // fix the file (drop the malicious entry), then the write goes
+    // through and the benign disable applies
+    std::fs::write(
+        t.overlay_dir.join("web.toml"),
+        "[[models]]\nid = \"deepseek/v4.x\"\ndisabled = true\n",
+    )
+    .unwrap();
+    let resp = post_json(
+        &t.app,
+        "/api/models/state",
+        &h,
+        serde_json::json!({"id": "zai/glm-5.3", "weight": 2.0}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "{}", body_string(resp).await);
+
+    let s = status_json(&t).await;
+    assert_eq!(s["overlay"]["errors"], serde_json::json!([]));
+    assert_eq!(
+        s["overlay"]["disabled"],
+        serde_json::json!(["deepseek/v4.x"])
+    );
+
+    // glm still serves via the ORIGINAL upstream (not evil.example)
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-subscription-A",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn quota_override_sets_windows_and_lists() {
+    let up = good_json().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![model("zai/glm-5.3", "A", &["quota"], &up, 1.0, (0.0, 0.0))];
+    let t = test_app(cfg);
+    let h = admin_headers(&t);
+
+    let resp = post_json(
+        &t.app,
+        "/api/quota/override",
+        &h,
+        serde_json::json!({
+            "provider": "z.ai",
+            "label": "5h",
+            "pct": 0.42,
+            "reset_in_secs": 3600,
+            "ttl_secs": 7200
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "{}", body_string(resp).await);
+
+    // status.json quota section carries the synthetic window
+    let s = status_json(&t).await;
+    let w = &s["quota"]["providers"]["z.ai"]["windows"][0];
+    assert_eq!(w["label"], "5h");
+    assert!((w["pct"].as_f64().unwrap() - 0.42).abs() < 1e-9);
+    assert_eq!(w["reset_in_secs"], 3600);
+
+    // and the management listing shows the override with its expiry
+    let resp = web_get(&t.app, "/api/models", h.clone()).await;
+    let body: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    let o = &body["quota_overrides"][0];
+    assert_eq!(o["provider"], "z.ai");
+    assert_eq!(o["active"], true);
+    assert_eq!(o["set_by"], "admin-session");
+
+    // invalid pct is rejected
+    let resp = post_json(
+        &t.app,
+        "/api/quota/override",
+        &h,
+        serde_json::json!({"provider": "z.ai", "label": "5h", "pct": 1.5}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn web_disabled_hides_the_whole_surface() {
     let mut cfg = Config::default();
@@ -1605,6 +2086,7 @@ fn quota_state_exhausted(provider: &str, reset_in_secs: u64) -> QuotaState {
             error: None,
             stale: false,
             updated_unix: None,
+            manual_until: None,
             windows: vec![quota::QuotaWindow {
                 label: "5h window".into(),
                 pct: 100.0,
@@ -1681,6 +2163,7 @@ async fn draining_provider_takes_matching_requests() {
                     error: None,
                     stale: false,
                     updated_unix: None,
+                    manual_until: None,
                     windows: vec![quota::QuotaWindow {
                         label: "weekly".into(),
                         pct: 76.0,
@@ -1696,6 +2179,7 @@ async fn draining_provider_takes_matching_requests() {
                     error: None,
                     stale: false,
                     updated_unix: None,
+                    manual_until: None,
                     windows: vec![quota::QuotaWindow {
                         label: "5h window".into(),
                         pct: 50.0,

@@ -56,11 +56,16 @@ button:hover { border-color: var(--accent); color: var(--accent); }
 table { border-collapse: collapse; width: 100%; margin: 8px 0 12px; font-size: 13px; }
 th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); }
 th { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
-form#mktoken { display: flex; flex-wrap: wrap; gap: 8px; }
-form#mktoken input {
+form#mktoken, form#addmodel, form#qovform { display: flex; flex-wrap: wrap; gap: 8px; }
+form#mktoken input, form#addmodel input, form#qovform input {
   background: var(--panel); color: var(--txt); border: 1px solid var(--line);
   border-radius: 6px; padding: 7px 10px; font: inherit; min-width: 140px;
 }
-form#mktoken input::placeholder { color: var(--dim); }
+form#mktoken input::placeholder, form#addmodel input::placeholder,
+form#qovform input::placeholder { color: var(--dim); }
+tr.off td { color: var(--dim); text-decoration: line-through; }
+td.acts { display: flex; gap: 6px; }
+td.acts button { padding: 3px 9px; font-size: 12px; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; }
 footer { padding: 20px 24px; border-top: 1px solid var(--line); font-size: 12px; }
 ul { padding-left: 18px; }
