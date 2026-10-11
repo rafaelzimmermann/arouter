@@ -307,6 +307,7 @@ pub fn merge_discovered(
             // F9: no silent broadening — a discovered sibling is exactly
             // as visible as the seed(s) that lent it credentials
             profiles: d.profiles.clone(),
+            wire: None,
             provenance,
             rationale,
             role_map: None,
@@ -400,6 +401,7 @@ mod tests {
             provenance: String::new(),
             rationale: String::new(),
             role_map: None,
+            wire: None,
         };
         // grouping is inside discover() — offline: just assert the key
         // math via the same tuple the map uses

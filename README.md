@@ -89,6 +89,27 @@ curl http://127.0.0.1:3929/v1/messages -H 'content-type: application/json' \
   -d '{"model":"A","max_tokens":512,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
+## Codex subscription models (E7)
+
+A ChatGPT/Codex subscription can serve the quota pool natively — no API
+key, no sidecar. Log in once with the Codex CLI (`codex login`), declare
+the model with `wire = "codex"`, and arouter translates openai
+chat-completions to the Codex Responses endpoint under the CLI's login
+(re-read per request — the CLI owns renewal):
+
+```toml
+[[models]]
+id   = "codex/gpt-6-astra"
+grade = "A+"
+pool  = ["quota"]
+wire  = "codex"
+```
+
+Subscription usage limits are learned from the `x-codex-primary-*` /
+`x-codex-secondary-*` response headers and feed the same quota windows
+as every other provider, so exhaustion, failover and cooldowns behave
+identically.
+
 ## Integration tests
 
 A black-box Docker rig (`tests/integration/`) drives the real daemon against stub upstreams with runtime-flippable behavior (ok · stream · 500 · 429 · 400 · slow) and a fake quota feed — 37 checks covering the routing matrix: grade ladder and ranges, pool boundaries, quota-aware skips (hit counters prove an exhausted provider is never contacted), failover, budget 402 breakdowns, cross-pool fallback, SSE streaming, caller attribution, SIGHUP hot-reload, and the observability stack end-to-end.

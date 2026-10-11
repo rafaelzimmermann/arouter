@@ -324,6 +324,11 @@ pub struct ModelConfig {
     /// `heuristic` / `auto`); manual config entries report `manual`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub provenance: String,
+    /// Upstream wire: `openai` (default, chat-completions) or `codex`
+    /// (E7 native Codex subscription adapter — the model entry points at
+    /// the ChatGPT Codex backend and arouter translates both ways; the
+    /// login comes from the Codex CLI, not from an API key).
+    pub wire: Option<String>,
     /// Rationale string for heuristic/auto grades (auditable).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub rationale: String,
@@ -348,6 +353,7 @@ impl Default for ModelConfig {
             cost_in: 0.0,
             cost_out: 0.0,
             profiles: vec![],
+            wire: None,
             provenance: String::new(),
             rationale: String::new(),
             role_map: None,
@@ -356,6 +362,13 @@ impl Default for ModelConfig {
 }
 
 impl ModelConfig {
+    /// Normalized upstream wire: `openai` | `codex`.
+    pub fn wire_kind(&self) -> &str {
+        match self.wire.as_deref() {
+            Some("codex") => "codex",
+            _ => "openai",
+        }
+    }
     pub fn upstream_name(&self) -> &str {
         match &self.name {
             Some(n) => n,
@@ -638,7 +651,16 @@ impl Config {
             if m.id.is_empty() {
                 return Err("model id must not be empty".into());
             }
-            if m.base_url.is_empty() {
+            if let Some(w) = m.wire.as_deref() {
+                if !matches!(w, "openai" | "codex") {
+                    return Err(format!("model {}: unknown wire {w:?} (openai | codex)", m.id));
+                }
+            }
+            // codex models default to the ChatGPT Codex backend and read
+            // the login from the Codex CLI — no base_url or API key needed
+            if m.base_url.is_empty()
+                && m.wire_kind() != "codex"
+            {
                 return Err(format!("model {}: base_url is required", m.id));
             }
             if ladder.rank(&m.grade).is_none() {

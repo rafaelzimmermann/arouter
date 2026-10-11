@@ -104,6 +104,11 @@ description = "premium models for hard tasks"
 # id: provider/model (model part defaults to the upstream name)
 # pool: quota | local | ondemand — hard boundary, never crossed silently
 # auth: env:NAME | key:LITERAL | none
+# wire: openai (default) | codex — codex routes through the native
+#       Codex subscription adapter (E7): no API key and no base_url; the
+#       login is read from the Codex CLI (`codex login`, ~/.codex/auth.json)
+#       per request, and subscription usage limits are learned from the
+#       x-codex-primary/secondary-* response headers.
 #
 # Cross-pool fallback is explicit opt-in (routing.md §2). When the quota
 # pool is exhausted, `cross_pool = ["ondemand"]` would pay instead of
@@ -144,6 +149,16 @@ context   = 131072
 weight    = 2.0
 base_url  = "http://127.0.0.1:8081/v1"
 auth      = "none"
+
+# E7: ChatGPT/Codex subscription as a quota-pool model — zero marginal
+# cost, no API key; `codex login` owns the credentials.
+[[models]]
+id        = "codex/gpt-6-astra"
+grade     = "A+"
+pool      = ["quota"]
+wire      = "codex"
+# base_url is optional (defaults to https://chatgpt.com/backend-api)
+# auth must be absent: the JWT comes from ~/.codex/auth.json
 
 [[models]]
 id        = "ollama/qwen3:14b"

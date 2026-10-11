@@ -16,7 +16,7 @@ use axum::http::{header, HeaderMap, HeaderName, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use futures::Stream;
+use futures::{Stream, TryStreamExt};
 use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
@@ -877,6 +877,26 @@ async fn try_candidates(
         }
         apply_role_map(payload, &m.role_map);
         payload["model"] = serde_json::Value::String(m.upstream_name.clone());
+        // E7: native Codex subscription wire — translate to the Codex
+        // Responses endpoint under the CLI login, translate back.
+        if m.wire == "codex" {
+            match codex_attempt(
+                st, rt, m, caller, profile, pool, raw_model, req, is_stream, payload, est,
+                cross_from, wire, t0, reserve,
+            )
+            .await
+            {
+                Ok(r) => return Ok(r),
+                Err(e) => {
+                    if let Some(resp) = e.fatal {
+                        return Ok(resp);
+                    }
+                    err.last_error = format!("{}: {}", m.id, e.last_error);
+                    err.attempts += 1;
+                    continue;
+                }
+            }
+        }
         let url = format!("{}/chat/completions", m.base_url);
         let mut rb = st.http.post(&url).json(&payload);
         if let Some(key) = &m.api_key {
@@ -992,8 +1012,7 @@ async fn try_candidates(
                         raw_model,
                         degraded,
                         is_stream,
-                        None,
-                        Some((ct, bytes)),
+                        Upstream::Buffered(ct, bytes),
                         t0,
                         est,
                         cross_from,
@@ -1013,8 +1032,7 @@ async fn try_candidates(
                     raw_model,
                     degraded,
                     is_stream,
-                    Some(resp),
-                    None,
+                    Upstream::Resp(resp),
                     t0,
                     est,
                     cross_from,
@@ -1186,10 +1204,246 @@ fn record_failure(
     st.metrics.record(&rec);
 }
 
-/// `buffered` carries the already-read body (content-type, bytes) for
-/// non-streaming relays — try_candidates drains it so a stalled or
-/// truncated body fails over BEFORE anything is committed (review F5).
-/// `resp` is `Some` only for streaming relays.
+/// What a successful attempt hands to [`relay_success`]: the raw
+/// openai-wire response (streaming), an already-translated byte stream
+/// (E7 codex wire, streaming), or a body read ahead of time — either
+/// pre-drained by `try_candidates` (F5) or translated from a Codex
+/// stream (E7 codex wire, non-streaming) — as (content-type, bytes).
+enum Upstream {
+    Resp(reqwest::Response),
+    Stream(Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Send>>),
+    Buffered(String, Bytes),
+}
+
+/// Why a codex attempt failed: `fatal` carries a client-facing error
+/// response to return unchanged (invalid request — the caller's
+/// fault, so no failover); otherwise the message feeds AttemptErr and
+/// the next candidate gets a chance.
+struct CodexFail {
+    last_error: String,
+    fatal: Option<Response>,
+}
+
+/// One attempt against the Codex subscription backend (E7). Mirrors the
+/// openai attempt path: headers/body deadlines (F5), a budget hold
+/// (F2/F3) and quota windows harvested from real inference responses;
+/// retryable failures fail over, and the login is re-read per request
+/// (the Codex CLI owns renewal — arouter never caches it).
+#[allow(clippy::too_many_arguments)]
+async fn codex_attempt(
+    st: &AppState,
+    rt: &Runtime,
+    m: &Model,
+    caller: &CallerIdentity,
+    profile: &str,
+    pool: &str,
+    raw_model: &str,
+    req: &crate::grades::GradeRequest,
+    is_stream: bool,
+    payload: &serde_json::Value,
+    est: &quota::RequestEstimate,
+    cross_from: Option<&str>,
+    wire: Wire,
+    t0: Instant,
+    reserve: Option<budget::ReserveGuard>,
+) -> Result<Response, CodexFail> {
+    let fail = |msg: String| CodexFail {
+        last_error: msg,
+        fatal: None,
+    };
+    let login = crate::codex::read_login().await.map_err(|e| fail(e.message))?;
+    let body = crate::codex::openai_to_codex(payload, &m.upstream_name).map_err(|e| {
+        // invalid request is the client's fault: no failover, plain 400
+        CodexFail {
+            last_error: format!("invalid request: {}", e.message),
+            fatal: Some(wire_error(wire, e.status, "invalid_request", e.message)),
+        }
+    })?;
+    let url = crate::codex::responses_url(&m.base_url);
+    let request = st
+        .http
+        .post(&url)
+        .header(header::AUTHORIZATION, format!("Bearer {}", login.token))
+        .header("chatgpt-account-id", login.account_id.as_str())
+        .header("OpenAI-Beta", "responses=experimental")
+        .header(header::ACCEPT, "text/event-stream")
+        .header("originator", concat!("arouter/", env!("CARGO_PKG_VERSION")))
+        .json(&body);
+    let prefix = m.id.split('/').next().unwrap_or("").to_string();
+    let harvest = rt.quota_harvest.get(&prefix).copied().unwrap_or(true);
+    // review F5: bound the wait for response headers, same as the openai wire
+    let resp = match tokio::time::timeout(
+        Duration::from_secs(rt.cfg.timeouts.headers_secs),
+        request.send(),
+    )
+    .await
+    {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => return Err(fail(format!("connect error: {e}"))),
+        Err(_) => return Err(fail("headers timeout".into())),
+    };
+    if !resp.status().is_success() {
+        let code = resp.status().as_u16();
+        // E3b (codex flavor): quota headers on failures are ground truth
+        // too; a bare 429 without them still pins a synthetic window.
+        let now = unix_now();
+        let windows = crate::codex::quota_windows(resp.headers(), now);
+        if harvest && !windows.is_empty() {
+            st.quota.apply(&prefix, windows, now);
+        } else if harvest && code == 429 {
+            let ra = resp
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(60);
+            st.quota.apply(&prefix, vec![quotaeng::harvest_429(ra)], now);
+        }
+        let body_text = truncate(&resp.text().await.unwrap_or_default(), 300);
+        let msg = format!("codex upstream {code}: {body_text}");
+        record_failure(
+            st,
+            rt,
+            m,
+            caller,
+            profile,
+            pool,
+            raw_model,
+            "upstream_error",
+            Some(code),
+            &msg,
+            t0.elapsed().as_millis() as u64,
+        );
+        // 401/403 = login expired or wrong account: behaves like a 503
+        // so the next candidate is tried instead of hard-failing
+        let effective = if code == 401 || code == 403 { 503 } else { code };
+        if retryable(effective) {
+            st.health.record_failure(&m.id, true);
+            return Err(fail(msg));
+        }
+        st.health.record_failure(&m.id, false);
+        return Ok(api_error_with(
+            code,
+            "upstream_error",
+            msg,
+            &[(hdr::UPSTREAM, m.id.clone())],
+        ));
+    }
+    let degraded = m.grade_rank != req.ceiling;
+    let now = unix_now();
+    let windows = crate::codex::quota_windows(resp.headers(), now);
+    if harvest && !windows.is_empty() {
+        st.quota.apply(&prefix, windows, now);
+    }
+    if !is_stream {
+        // upstream always streams: buffer (deadline-bounded, F5),
+        // translate, relay a plain chat-completions JSON body. A
+        // truncated stream (no terminal event) is an upstream failure —
+        // fail over, never an empty 200.
+        let idle = Duration::from_secs(rt.cfg.timeouts.idle_secs);
+        let bytes = match tokio::time::timeout(idle, resp.bytes()).await {
+            Ok(Ok(b)) => b,
+            Ok(Err(e)) => {
+                let msg = format!("body read failed: {e}");
+                record_failure(
+                    st,
+                    rt,
+                    m,
+                    caller,
+                    profile,
+                    pool,
+                    raw_model,
+                    "upstream_error",
+                    Some(200),
+                    &msg,
+                    t0.elapsed().as_millis() as u64,
+                );
+                st.health.record_failure(&m.id, true);
+                return Err(fail(msg));
+            }
+            Err(_) => {
+                let msg = "codex body stalled past idle_secs".to_string();
+                record_failure(
+                    st,
+                    rt,
+                    m,
+                    caller,
+                    profile,
+                    pool,
+                    raw_model,
+                    "timeout",
+                    Some(200),
+                    &msg,
+                    t0.elapsed().as_millis() as u64,
+                );
+                st.health.record_failure(&m.id, true);
+                return Err(fail(msg));
+            }
+        };
+        let completion =
+            crate::codex::parse_buffered_sse(&bytes, &m.upstream_name).map_err(|e| {
+                let msg = e.to_string();
+                record_failure(
+                    st,
+                    rt,
+                    m,
+                    caller,
+                    profile,
+                    pool,
+                    raw_model,
+                    "upstream_error",
+                    Some(200),
+                    &msg,
+                    t0.elapsed().as_millis() as u64,
+                );
+                st.health.record_failure(&m.id, true);
+                fail(msg)
+            })?;
+        st.health.record_success(&m.id);
+        return Ok(relay_success(
+            st,
+            rt,
+            m,
+            caller,
+            profile,
+            pool,
+            raw_model,
+            degraded,
+            is_stream,
+            Upstream::Buffered("application/json".into(), Bytes::from(completion.to_string())),
+            t0,
+            est,
+            cross_from,
+            wire,
+            reserve,
+        )
+        .await);
+    }
+    st.health.record_success(&m.id);
+    let stream = CodexSse::new(
+        resp.bytes_stream(),
+        crate::codex::SseTranslator::new(&m.upstream_name),
+    );
+    Ok(relay_success(
+        st,
+        rt,
+        m,
+        caller,
+        profile,
+        pool,
+        raw_model,
+        degraded,
+        is_stream,
+        Upstream::Stream(Box::pin(stream)),
+        t0,
+        est,
+        cross_from,
+        wire,
+        reserve,
+    )
+    .await)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn relay_success(
     st: &AppState,
@@ -1201,8 +1455,7 @@ async fn relay_success(
     requested: &str,
     degraded: bool,
     is_stream: bool,
-    resp: Option<reqwest::Response>,
-    buffered: Option<(String, Bytes)>,
+    upstream: Upstream,
     t0: Instant,
     est: &quota::RequestEstimate,
     cross_from: Option<&str>,
@@ -1216,17 +1469,16 @@ async fn relay_success(
     } else {
         "application/json"
     };
-    let ct = buffered
-        .as_ref()
-        .map(|(c, _)| c.clone())
-        .or_else(|| {
-            resp.as_ref()?
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| default_ct.to_string());
+    let ct = match &upstream {
+        Upstream::Resp(r) => r
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+            .unwrap_or_else(|| default_ct.to_string()),
+        Upstream::Stream(_) => "text/event-stream".to_string(),
+        Upstream::Buffered(ct, _) => ct.clone(),
+    };
 
     let mut builder = Response::builder()
         .status(StatusCode::OK)
@@ -1282,8 +1534,20 @@ async fn relay_success(
                 builder = builder.header(hdr::BUDGET_REMAINING, format!("{:.6}", rem));
             }
         }
+        // E7 codex wire: translate upstream Responses-SSE into
+        // chat-completions-SSE inside the tap, so usage accounting,
+        // health and metrics see the openai wire they already parse.
+        let bytes_stream: Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Send>> =
+            match upstream {
+                Upstream::Resp(r) => Box::pin(
+                    r.bytes_stream()
+                        .map_err(|e: reqwest::Error| std::io::Error::other(e.to_string())),
+                ),
+                Upstream::Stream(s) => s,
+                Upstream::Buffered(..) => unreachable!("buffered relay is not streaming"),
+            };
         let tap = TapStream::new(
-            resp.expect("streaming relay").bytes_stream(),
+            bytes_stream,
             TapMeta {
                 pool: pool.into(),
                 profile: profile.into(),
@@ -1318,7 +1582,11 @@ async fn relay_success(
     } else {
         // The body was fully read (and deadline-bounded) by
         // try_candidates — stalls/truncations already failed over there.
-        let (_, bytes) = buffered.expect("buffered relay");
+        // E7 codex wire arrives here already translated (Upstream::Buffered).
+        let bytes = match upstream {
+            Upstream::Buffered(_, b) => b,
+            _ => unreachable!("non-streaming relay always has a buffered body"),
+        };
         let (tin, tout) = extract_usage(&bytes);
         // F2: the actual record replaces the estimate hold first —
         // settle-then-record keeps spend from double-counting
@@ -1452,7 +1720,7 @@ pub struct TapMeta {
 /// `usage` object; records one UsageRecord (usage log + metrics) when the
 /// stream ends.
 pub struct TapStream {
-    inner: Pin<Box<dyn Stream<Item = reqwest::Result<Bytes>> + Send>>,
+    inner: Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Send>>,
     scan: UsageScan,
     meta: TapMeta,
     usage: Arc<UsageLog>,
@@ -1471,7 +1739,7 @@ pub struct TapStream {
 
 impl TapStream {
     pub fn new(
-        inner: impl Stream<Item = reqwest::Result<Bytes>> + Send + 'static,
+        inner: impl Stream<Item = std::io::Result<Bytes>> + Send + 'static,
         meta: TapMeta,
         usage: Arc<UsageLog>,
         metrics: Arc<Metrics>,
@@ -1562,7 +1830,7 @@ impl Stream for TapStream {
             }
             std::task::Poll::Ready(Some(Err(e))) => {
                 self.finish("upstream_error");
-                std::task::Poll::Ready(Some(Err(std::io::Error::other(e.to_string()))))
+                std::task::Poll::Ready(Some(Err(e)))
             }
             std::task::Poll::Ready(None) => {
                 self.finish("ok");
@@ -1638,6 +1906,74 @@ where
                 }
             }
             std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+/// E7: wraps a Codex Responses-SSE upstream and re-emits
+/// chat-completions-SSE. Sits inside the TapStream so usage
+/// accounting, health and metrics see the openai wire they already
+/// parse; upstream SSE errors and a missing terminal event surface as
+/// stream errors (F4), never as a silent empty success.
+struct CodexSse<S> {
+    inner: S,
+    tr: crate::codex::SseTranslator,
+    out: std::collections::VecDeque<Bytes>,
+}
+
+impl<S> CodexSse<S>
+where
+    S: Stream<Item = reqwest::Result<Bytes>> + Unpin,
+{
+    fn new(inner: S, tr: crate::codex::SseTranslator) -> Self {
+        Self {
+            inner,
+            tr,
+            out: Default::default(),
+        }
+    }
+}
+
+impl<S> Stream for CodexSse<S>
+where
+    S: Stream<Item = reqwest::Result<Bytes>> + Unpin,
+{
+    type Item = std::io::Result<Bytes>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        loop {
+            if let Some(b) = this.out.pop_front() {
+                return std::task::Poll::Ready(Some(Ok(b)));
+            }
+            match Pin::new(&mut this.inner).poll_next(cx) {
+                std::task::Poll::Ready(Some(Ok(bytes))) => {
+                    this.tr.push_bytes(&bytes);
+                    while let Some(frame) = this.tr.pop_frame() {
+                        this.out.push_back(Bytes::from(frame));
+                    }
+                    continue;
+                }
+                std::task::Poll::Ready(Some(Err(e))) => {
+                    this.out.clear();
+                    return std::task::Poll::Ready(Some(Err(std::io::Error::other(
+                        e.to_string(),
+                    ))));
+                }
+                std::task::Poll::Ready(None) => {
+                    return match this.tr.finish() {
+                        Ok(()) => std::task::Poll::Ready(None),
+                        Err(e) => {
+                            this.out.clear();
+                            std::task::Poll::Ready(Some(Err(std::io::Error::other(e))))
+                        }
+                    }
+                }
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            }
         }
     }
 }
@@ -1752,7 +2088,7 @@ mod tests {
         _guard: (),
     }
     impl Stream for HeldStream {
-        type Item = reqwest::Result<Bytes>;
+        type Item = std::io::Result<Bytes>;
         fn poll_next(
             self: Pin<&mut Self>,
             _cx: &mut std::task::Context<'_>,
@@ -1818,7 +2154,9 @@ mod tests {
         let err = reqwest::get("http://127.0.0.1:1/x")
             .await
             .expect_err("nothing listens on port 1");
-        let broken = futures::stream::iter(vec![Err::<Bytes, reqwest::Error>(err)]);
+        let broken = futures::stream::iter(vec![Err::<Bytes, std::io::Error>(std::io::Error::other(
+            err.to_string(),
+        ))]);
         {
             let tap = TapStream::new(
                 broken,

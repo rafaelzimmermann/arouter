@@ -23,6 +23,9 @@ pub struct Model {
     pub cost_out: f64,
     /// Blended $/Mtok: (in + 3×out)/4 — typical 1:3 coding mix.
     pub blended_cost: f64,
+    /// Upstream wire: `openai` (chat-completions) | `codex` (E7 native
+    /// Codex subscription adapter).
+    pub wire: String,
     pub profiles: Vec<String>,
     /// `manual` | `auto` | `catalog` | `heuristic` | `unknown`.
     pub provenance: String,
@@ -65,12 +68,17 @@ impl Registry {
                 grade_rank: ladder.rank(&m.grade).expect("validated"),
                 pools: m.pool.clone(),
                 context: m.context,
-                base_url: m.base_url.trim_end_matches('/').to_string(),
+                base_url: if m.wire_kind() == "codex" && m.base_url.trim().is_empty() {
+                    crate::codex::DEFAULT_BASE_URL.to_string()
+                } else {
+                    m.base_url.trim_end_matches('/').to_string()
+                },
                 api_key: keys.resolve(&m.auth),
                 weight: if m.weight > 0.0 { m.weight } else { 1.0 },
                 cost_in: m.cost_in,
                 cost_out: m.cost_out,
                 blended_cost: (m.cost_in + 3.0 * m.cost_out) / 4.0,
+                wire: m.wire_kind().to_string(),
                 profiles: m.profiles.clone(),
                 provenance: if m.provenance.is_empty() {
                     "manual".to_string()
@@ -265,6 +273,29 @@ mod tests {
 
     fn req(l: &Ladder, g: &str) -> GradeRequest {
         l.parse_request(g).unwrap()
+    }
+
+    #[test]
+    fn codex_wire_defaults_base_url_and_propagates() {
+        // E7: a codex model with no base_url gets the ChatGPT Codex
+        // backend; the wire kind rides through to the registry Model.
+        let mut cfg = Config::default();
+        cfg.models = vec![ModelConfig {
+            id: "codex/gpt-6-astra".into(),
+            grade: "A+".into(),
+            pool: vec!["quota".into()],
+            wire: Some("codex".into()),
+            ..ModelConfig::default()
+        }];
+        cfg.validate().unwrap(); // empty base_url is legal for codex
+        let reg = Registry::from_config(&cfg, &ks()).unwrap();
+        let m = reg
+            .models
+            .iter()
+            .find(|m| m.id == "codex/gpt-6-astra")
+            .expect("registered");
+        assert_eq!(m.wire, "codex");
+        assert_eq!(m.base_url, crate::codex::DEFAULT_BASE_URL);
     }
 
     #[test]

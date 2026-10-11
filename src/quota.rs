@@ -907,6 +907,7 @@ mod tests {
         };
         let models = vec![
             Model {
+            wire: "openai".into(),
                 id: "slow/m".into(),
                 grade_rank: 1,
                 ..Default::default()
@@ -933,6 +934,7 @@ mod tests {
         };
         let models = vec![
             Model {
+            wire: "openai".into(),
                 id: "a/m".into(),
                 grade_rank: 1,
                 ..Default::default()
@@ -1011,10 +1013,12 @@ mod tests {
             max_tokens: None,
         };
         let primary = Model {
+            wire: "openai".into(),
             weight: 2.0,
             ..model_stub_with_id("zai/primary")
         };
         let backup = Model {
+            wire: "openai".into(),
             weight: 1.0,
             ..model_stub_with_id("zai/backup")
         };
@@ -1047,6 +1051,7 @@ mod tests {
             panel(&[(30.0, Some(now + DRAIN_SECS + 20 * 3600))], None),
         );
         let m = |id: &str| Model {
+            wire: "openai".into(),
             id: id.into(),
             grade_rank: 1,
             pools: vec!["quota".into()],
@@ -1098,12 +1103,14 @@ mod tests {
             max_tokens: None,
         };
         let a_model = Model {
+            wire: "openai".into(),
             grade_rank: 0, // A (ladder A+ first? ranks are 0-based best)
             cost_in: 5.0,
             cost_out: 25.0,
             ..model_stub_with_id("or/expensive-a")
         };
         let b_model = Model {
+            wire: "openai".into(),
             grade_rank: 1,
             cost_in: 0.01,
             cost_out: 0.02,
@@ -1131,6 +1138,7 @@ mod tests {
             max_tokens: None,
         };
         let m = |id: &str, cin: f64, cout: f64| Model {
+            wire: "openai".into(),
             id: id.into(),
             grade_rank: 1,
             pools: vec!["ondemand".into()],
@@ -1187,6 +1195,7 @@ mod tests {
             profiles: vec![],
             provenance: "manual".into(),
             role_map: Default::default(),
+            wire: "openai".into(),
         };
         let slow = m("x/slow", 1);
         let fast = m("x/fast", 1);
@@ -1222,16 +1231,19 @@ mod tests {
         assert!((est.est_out - 4096.0).abs() < 1e-9, "min(100k,8192)×0.5");
 
         let small = Model {
+            wire: "openai".into(),
             context: Some(8192),
             ..model_stub()
         };
         assert!(!context_fits(&small, &est), "100k max_tokens > 8k ctx");
         let big = Model {
+            wire: "openai".into(),
             context: Some(200_000),
             ..model_stub()
         };
         assert!(context_fits(&big, &est));
         let unknown = Model {
+            wire: "openai".into(),
             context: None,
             ..model_stub()
         };
@@ -1246,6 +1258,7 @@ mod tests {
         Model {
             id: id.into(),
             grade_rank: 1,
+            wire: "openai".into(),
             pools: vec!["quota".into()],
             base_url: "http://x".into(),
             api_key: None,

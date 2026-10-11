@@ -5,6 +5,7 @@
 
 pub mod budget;
 pub mod catalog;
+pub mod codex;
 pub mod config;
 pub mod discover;
 pub mod doctor;
