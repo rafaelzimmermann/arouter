@@ -14,11 +14,12 @@ use arouter::quota::{self, ProviderState, QuotaState, QuotaWatcher};
 use arouter::registry::Registry;
 use arouter::usage::UsageLog;
 use axum::body::Body;
-use axum::http::{header, HeaderMap, HeaderName, Request, StatusCode};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::Router;
 use http_body_util::BodyExt;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -148,6 +149,8 @@ struct TestApp {
     sticky: Arc<arouter::localeng::StickyMap>,
     /// handle onto the swappable runtime snapshot (F6 tests)
     runtime: Arc<RwLock<Arc<proxy::Runtime>>>,
+    /// E10 web sessions (claim/session/CSRF tests)
+    web: Arc<arouter::web::Web>,
 }
 
 fn test_app(cfg: Config) -> TestApp {
@@ -174,9 +177,11 @@ fn test_app_health_quota(cfg: Config, policy: HealthPolicy, quota_state: QuotaSt
     let http = proxy::client(&cfg.timeouts);
     let local = Arc::new(arouter::localeng::LocalEngines::default());
     let sticky = Arc::new(arouter::localeng::StickyMap::new(sticky_ttl));
+    let web_cfg = cfg.web.clone();
     let runtime = Arc::new(RwLock::new(Arc::new(
         proxy::Runtime::build(cfg, &keys).unwrap(),
     )));
+    let web = Arc::new(arouter::web::Web::new(&web_cfg));
     let state = proxy::AppState {
         runtime: runtime.clone(),
         usage: usage.clone(),
@@ -187,6 +192,7 @@ fn test_app_health_quota(cfg: Config, policy: HealthPolicy, quota_state: QuotaSt
         sticky: sticky.clone(),
         http,
         started: Instant::now(),
+        web: web.clone(),
     };
     TestApp {
         app: proxy::router(state),
@@ -197,6 +203,7 @@ fn test_app_health_quota(cfg: Config, policy: HealthPolicy, quota_state: QuotaSt
         local,
         sticky,
         runtime,
+        web,
     }
 }
 
@@ -368,6 +375,206 @@ async fn failover_on_retryable_500() {
     let m = t.metrics.render();
     assert!(m.contains("status=\"upstream_error\""));
     assert!(m.contains("status=\"ok\""));
+}
+
+// ─────────────────── E10a: web sessions + claim ───────────────────
+
+/// Wrap the app so handlers see a peer address (normally supplied by
+/// `into_make_service_with_connect_info`).
+fn app_with_peer(app: &Router, peer: &str) -> Router {
+    use axum::extract::ConnectInfo;
+    app.clone().layer(axum::Extension(ConnectInfo(
+        peer.parse::<SocketAddr>().unwrap(),
+    )))
+}
+
+async fn web_get(app: &Router, path: &str, headers: HeaderMap) -> Response {
+    let mut req = Request::get(path).body(Body::empty()).unwrap();
+    for (k, v) in &headers {
+        req.headers_mut().insert(k, v.clone());
+    }
+    app.clone().oneshot(req).await.unwrap()
+}
+
+fn cookie_of(resp: &Response) -> Option<String> {
+    let raw = resp.headers().get(header::SET_COOKIE)?.to_str().ok()?;
+    let sid = raw.split(';').next()?.to_string();
+    Some(sid)
+}
+
+#[tokio::test]
+async fn web_shell_is_static_but_api_needs_a_session() {
+    let cfg = Config::default();
+    let t = test_app(cfg);
+
+    // the shell is public and carries a CSP
+    let resp = web_get(&t.app, "/", HeaderMap::new()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let csp = resp
+        .headers()
+        .get("content-security-policy")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(csp.contains("default-src 'self'"), "csp: {csp}");
+    let html = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html.contains("arouter"));
+    assert!(!html.contains("<script>"), "no inline script (CSP)");
+
+    for asset in ["/app.js", "/style.css"] {
+        let resp = web_get(&t.app, asset, HeaderMap::new()).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{asset}");
+    }
+
+    // reads are gated too — no session, no data
+    for api in ["/api/session", "/api/overview"] {
+        let resp = web_get(&t.app, api, HeaderMap::new()).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{api}");
+    }
+
+    // a bogus cookie is not a session
+    let mut h = HeaderMap::new();
+    h.insert(
+        header::COOKIE,
+        HeaderValue::from_static("arouter_sid=deadbeef"),
+    );
+    let resp = web_get(&t.app, "/api/session", h).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn web_claim_is_loopback_only_single_use_and_grants_admin() {
+    let cfg = Config::default();
+    let t = test_app(cfg);
+    let token = t.web.claim_token().expect("fresh claim");
+
+    // remote peers cannot claim, even with the exact token
+    let remote = app_with_peer(&t.app, "192.168.50.9:51000");
+    let resp = web_get(&remote, &format!("/claim/{token}"), HeaderMap::new()).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // a wrong token from loopback cannot claim either
+    let local = app_with_peer(&t.app, "127.0.0.1:51000");
+    let resp = web_get(&local, "/claim/deadbeef", HeaderMap::new()).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert!(t.web.claim_token().is_some(), "still unclaimed");
+
+    // loopback + exact token: 303 to / with the session cookie
+    let resp = web_get(&local, &format!("/claim/{token}"), HeaderMap::new()).await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(resp.headers().get(header::LOCATION).unwrap(), "/");
+    let cookie = cookie_of(&resp).expect("session cookie");
+    assert!(cookie.starts_with("arouter_sid="));
+    let set_cookie = resp
+        .headers()
+        .get(header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(set_cookie.contains("HttpOnly"), "{set_cookie}");
+    assert!(set_cookie.contains("SameSite=Strict"), "{set_cookie}");
+
+    // the link is dead now — a replay does nothing
+    let resp = web_get(&local, &format!("/claim/{token}"), HeaderMap::new()).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // …and the session works for reads
+    let mut h = HeaderMap::new();
+    h.insert(header::COOKIE, HeaderValue::from_str(&cookie).unwrap());
+    let resp = web_get(&t.app, "/api/session", h.clone()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["role"], "admin");
+
+    let resp = web_get(&t.app, "/api/overview", h).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(body["models"].as_u64().is_some());
+}
+
+#[tokio::test]
+async fn web_writes_require_same_origin() {
+    let cfg = Config::default();
+    let t = test_app(cfg);
+    let sid = t.web.mint_session("admin", arouter::quota::unix_now());
+    let cookie = format!("arouter_sid={sid}");
+
+    // cross-site fetch is refused even with a valid cookie
+    let mut h = HeaderMap::new();
+    h.insert(header::COOKIE, HeaderValue::from_str(&cookie).unwrap());
+    h.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
+    h.insert(header::HOST, HeaderValue::from_static("127.0.0.1:3929"));
+    let req = Request::post("/api/logout").body(Body::empty()).unwrap();
+    let mut req = req;
+    for (k, v) in &h {
+        req.headers_mut().insert(k, v.clone());
+    }
+    let resp = t.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // an Origin for another host fails the same way
+    let mut h = HeaderMap::new();
+    h.insert(header::COOKIE, HeaderValue::from_str(&cookie).unwrap());
+    h.insert(
+        header::ORIGIN,
+        HeaderValue::from_static("http://evil.example"),
+    );
+    h.insert(header::HOST, HeaderValue::from_static("127.0.0.1:3929"));
+    let mut req = Request::post("/api/logout").body(Body::empty()).unwrap();
+    for (k, v) in &h {
+        req.headers_mut().insert(k, v.clone());
+    }
+    let resp = t.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    // the session survived the rejected writes
+    assert!(t.web.session(&sid, arouter::quota::unix_now()).is_some());
+
+    // same-origin succeeds and revokes
+    let mut h = HeaderMap::new();
+    h.insert(header::COOKIE, HeaderValue::from_str(&cookie).unwrap());
+    h.insert(
+        header::ORIGIN,
+        HeaderValue::from_static("http://127.0.0.1:3929"),
+    );
+    h.insert(header::HOST, HeaderValue::from_static("127.0.0.1:3929"));
+    let mut req = Request::post("/api/logout").body(Body::empty()).unwrap();
+    for (k, v) in &h {
+        req.headers_mut().insert(k, v.clone());
+    }
+    let resp = t.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        t.web.session(&sid, arouter::quota::unix_now()).is_none(),
+        "server-side revocation"
+    );
+}
+
+#[tokio::test]
+async fn web_disabled_hides_the_whole_surface() {
+    let mut cfg = Config::default();
+    cfg.web.enabled = false;
+    let t = test_app(cfg);
+    for path in [
+        "/",
+        "/app.js",
+        "/style.css",
+        "/api/session",
+        "/api/overview",
+    ] {
+        let resp = web_get(&t.app, path, HeaderMap::new()).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{path}");
+    }
 }
 
 #[tokio::test]

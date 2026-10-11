@@ -37,6 +37,29 @@ pub struct Config {
     pub models: Vec<ModelConfig>,
     pub auth: AuthConfig,
     pub callers: Vec<CallerConfig>,
+    /// E10a web interface: static shell, sessions, claim bootstrap.
+    #[serde(default)]
+    pub web: WebConfig,
+}
+
+/// `[web]` — the web shell and its session policy (review: "sessions/claim
+/// first"). Disabling it removes `/`, `/app.js`, `/style.css`, `/claim/*`
+/// and `/api/*`; the proxy surface is unaffected either way.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct WebConfig {
+    pub enabled: bool,
+    /// Session lifetime for the `HttpOnly` cookie.
+    pub session_ttl_hours: u64,
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        WebConfig {
+            enabled: true,
+            session_ttl_hours: 12,
+        }
+    }
 }
 
 /// Upstream deadline policy (review F5). A connected upstream that

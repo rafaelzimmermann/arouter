@@ -110,6 +110,8 @@ pub struct AppState {
     pub sticky: Arc<crate::localeng::StickyMap>,
     pub http: reqwest::Client,
     pub started: Instant,
+    /// E10a web shell: sessions + claim bootstrap.
+    pub web: Arc<crate::web::Web>,
 }
 
 impl AppState {
@@ -153,6 +155,14 @@ pub fn router(state: AppState) -> Router {
         .route("/status.json", get(status))
         .route("/healthz", get(healthz))
         .route("/metrics", get(metrics_scrape))
+        // E10a web shell — static assets, claim bootstrap, session API
+        .route("/", get(crate::web::index))
+        .route("/app.js", get(crate::web::app_js))
+        .route("/style.css", get(crate::web::style_css))
+        .route("/claim/{token}", get(crate::web::claim))
+        .route("/api/session", get(crate::web::api_session))
+        .route("/api/overview", get(crate::web::api_overview))
+        .route("/api/logout", post(crate::web::api_logout))
         .with_state(state)
 }
 

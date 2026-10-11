@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>arouter</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">arouter<span class="dot">·</span><span id="host"></span></div>
+  <div id="who" class="who"></div>
+</header>
+
+<main>
+  <section id="login" hidden>
+    <h1>not signed in</h1>
+    <p class="dim">
+      arouter has no default password. Start it, then open the claim link it
+      prints under the startup banner:
+    </p>
+    <pre class="cmd">web: claim http://127.0.0.1:3929/claim/…</pre>
+    <p class="dim">
+      The link works once, from the machine the daemon runs on. This page is a
+      static shell — reload it after claiming.
+    </p>
+  </section>
+
+  <section id="panel" hidden>
+    <h1>overview</h1>
+    <div class="grid" id="stats"></div>
+    <h2>next</h2>
+    <ul class="dim">
+      <li>E10b — API tokens (<code>ark_…</code>) with grade/pool/model scopes</li>
+      <li>E10c — model, provider and quota management</li>
+      <li>E10d — users, access rules, settings</li>
+    </ul>
+    <button id="logout">sign out</button>
+  </section>
+</main>
+
+<footer>
+  <span class="dim">session cookie · HttpOnly · SameSite=Strict · same-origin writes only</span>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>

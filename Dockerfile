@@ -4,6 +4,7 @@ FROM rust:1-bookworm AS build
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY web ./web
 COPY config.example.toml ./
 RUN cargo build --release --locked --bin arouter
 

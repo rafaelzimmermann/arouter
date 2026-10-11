@@ -357,6 +357,10 @@ async fn serve(
         );
     }
 
+    // E10a: web shell state. The claim token is minted per start and never
+    // persisted — an old link dies with the old process.
+    let web = std::sync::Arc::new(arouter::web::Web::new(&cfg.web));
+
     let state = proxy::AppState {
         runtime: reloader.shared.clone(),
         usage: usage.clone(),
@@ -367,10 +371,18 @@ async fn serve(
         sticky,
         http: proxy::client(&cfg.timeouts),
         started: Instant::now(),
+        web: web.clone(),
     };
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     print_banner(&bind, registry.models.len());
+    if cfg.web.enabled {
+        if let Some(token) = web.claim_token() {
+            // loopback-only, single-use — printed so the operator can
+            // bootstrap an admin session without a default password
+            println!("web: claim http://{bind}/claim/{token}");
+        }
+    }
     tracing::info!(
         "arouter v{} listening on http://{bind} ({} models, {} profiles, {} callers, auth required: {})",
         env!("CARGO_PKG_VERSION"),
@@ -403,7 +415,12 @@ async fn serve(
 
     let reload_task = tokio::spawn(reload_loop(reloader));
     let app = proxy::router(state);
-    let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
+    // connect info feeds the claim's loopback check
+    let server = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal());
     tokio::select! {
         r = server => r?,
         _ = reload_task => {},

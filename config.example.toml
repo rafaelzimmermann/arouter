@@ -203,3 +203,17 @@ kind = "auto"                     # auto | ollama | llamacpp
 # [[local_engines.engines]]
 # url  = "http://127.0.0.1:8081"   # strata / llama.cpp server
 # kind = "llamacpp"
+
+# ─────────────────────────── web interface (E10a) ───────────────────────────
+# Static shell + JSON API on the same listener. There is no default
+# password: at startup the daemon prints
+#     web: claim http://127.0.0.1:3929/claim/<token>
+# The link is single-use and only consumable from loopback; opening it
+# mints an admin session cookie (HttpOnly, SameSite=Strict). Mutating API
+# calls additionally require a same-origin Origin/Host match.
+# Disabling this removes /, /app.js, /style.css, /claim/* and /api/*;
+# the proxy surface (/v1/...) is unaffected.
+
+[web]
+enabled = true
+session_ttl_hours = 12
