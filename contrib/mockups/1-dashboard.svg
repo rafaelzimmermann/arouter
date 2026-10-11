@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 760" width="1160" height="760" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif"><rect x="0" y="0" width="1160" height="760" rx="16" fill="#0D1117"/>
+<polygon points="40,18 52,30 40,42 28,30" fill="#2DD4BF"/>
+<text x="62" y="34" text-anchor="start" font-size="18" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">arouter</text>
+<text x="1136" y="34" text-anchor="end" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">up · 477 models · 0.0.0.0:3929 · web on</text>
+<rect x="24" y="84" width="224" height="96" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="118" text-anchor="start" font-size="26" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">A+</text>
+<text x="40" y="146" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">12 models</text>
+<text x="40" y="168" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">quota · ondemand</text>
+<rect x="264" y="84" width="224" height="96" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="280" y="118" text-anchor="start" font-size="26" fill="#E3B341" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">A</text>
+<text x="280" y="146" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">38 models</text>
+<text x="280" y="168" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">quota · local · ondemand</text>
+<rect x="504" y="84" width="224" height="96" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="520" y="118" text-anchor="start" font-size="26" fill="#58A6FF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">B</text>
+<text x="520" y="146" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">427 models</text>
+<text x="520" y="168" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">quota · local</text>
+<rect x="24" y="196" width="700" height="150" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="222" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">providers — quota windows</text>
+<text x="40" y="248" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">z.ai</text>
+<rect x="170" y="244" width="240" height="8" rx="4" fill="#30363D"/>
+<rect x="170" y="244" width="79.2" height="8" rx="4" fill="#3FB950"/>
+<text x="430" y="248" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">↻ 1h17m</text>
+<text x="520" y="248" text-anchor="start" font-size="12" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">⚡ drain</text>
+<text x="40" y="280" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">codex</text>
+<rect x="170" y="276" width="240" height="8" rx="4" fill="#30363D"/>
+<rect x="170" y="276" width="7.199999999999999" height="8" rx="4" fill="#3FB950"/>
+<text x="430" y="280" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">↻ 2d</text>
+<text x="40" y="312" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">openrouter</text>
+<rect x="170" y="308" width="240" height="8" rx="4" fill="#30363D"/>
+<rect x="170" y="308" width="146.4" height="8" rx="4" fill="#E3B341"/>
+<text x="430" y="312" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">↻ 9h</text>
+<text x="520" y="312" text-anchor="start" font-size="12" fill="#E3B341" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">pace ahead</text>
+<rect x="744" y="196" width="392" height="150" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="760" y="222" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">live</text>
+<text x="760" y="246" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">in flight</text>
+<text x="1120" y="246" text-anchor="end" font-size="14" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">2</text>
+<text x="760" y="270" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">degraded 1h</text>
+<text x="1120" y="270" text-anchor="end" font-size="14" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">0</text>
+<text x="760" y="294" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">spend today</text>
+<text x="1120" y="294" text-anchor="end" font-size="14" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$1.24</text>
+<text x="760" y="318" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">uptime</text>
+<text x="1120" y="318" text-anchor="end" font-size="14" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">3d 4h</text>
+<rect x="24" y="362" width="1112" height="240" rx="10" fill="#161B22" stroke="#30363D"/>
+<text x="40" y="390" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">models — grade · pool · enabled</text>
+<circle cx="40" cy="410" r="6" fill="#3FB950"/>
+<text x="56" y="414" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">glm-5.3</text>
+<text x="330" y="414" text-anchor="start" font-size="14" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">A+</text>
+<text x="380" y="414" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">quota</text>
+<text x="470" y="414" text-anchor="start" font-size="12" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">on</text>
+<text x="600" y="414" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">w 1.5</text>
+<text x="1112" y="414" text-anchor="end" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">grade ▾   disable</text>
+<circle cx="40" cy="454" r="6" fill="#3FB950"/>
+<text x="56" y="458" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">glm-5.2</text>
+<text x="330" y="458" text-anchor="start" font-size="14" fill="#E3B341" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">A</text>
+<text x="380" y="458" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">quota</text>
+<text x="470" y="458" text-anchor="start" font-size="12" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">on</text>
+<text x="600" y="458" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">w 1.0</text>
+<text x="1112" y="458" text-anchor="end" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">grade ▾   disable</text>
+<circle cx="40" cy="498" r="6" fill="#3FB950"/>
+<text x="56" y="502" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">qwen3.8-flash</text>
+<text x="330" y="502" text-anchor="start" font-size="14" fill="#58A6FF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">B</text>
+<text x="380" y="502" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">local</text>
+<text x="470" y="502" text-anchor="start" font-size="12" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">on</text>
+<text x="600" y="502" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">resident · warm</text>
+<text x="1112" y="502" text-anchor="end" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">grade ▾   disable</text>
+<circle cx="40" cy="542" r="6" fill="#F45067"/>
+<text x="56" y="546" text-anchor="start" font-size="14" fill="#E6EDF3" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">or/claude-opus-4.6</text>
+<text x="330" y="546" text-anchor="start" font-size="14" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">A+</text>
+<text x="380" y="546" text-anchor="start" font-size="12" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">ondemand</text>
+<text x="470" y="546" text-anchor="start" font-size="12" fill="#F45067" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">off</text>
+<text x="600" y="546" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">$5/$25 · vip only</text>
+<text x="1112" y="546" text-anchor="end" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">grade ▾   disable</text>
+<text x="40" y="586" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">every change = POST /api/… · session cookie + same-origin required</text>
+</svg>
