@@ -2,8 +2,9 @@
 //! (backup + JSON-aware), install the systemd user unit, then hand off
 //! to `doctor`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
@@ -121,6 +122,119 @@ fn default_reasoning(grade: &str) -> Option<bool> {
     }
 }
 
+/// `[server].bind` → loopback HTTP base URL: wildcard hosts resolve to
+/// 127.0.0.1 (the daemon listens there); a stray `http://` is tolerated.
+fn daemon_base(bind: &str) -> String {
+    let bind = bind
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    let (host, port) = bind.rsplit_once(':').unwrap_or((bind, "3929"));
+    let host = host.trim_matches(['[', ']']);
+    let host = if host.is_empty() || host == "0.0.0.0" || host == "::" {
+        "127.0.0.1"
+    } else {
+        host
+    };
+    format!("http://{host}:{port}")
+}
+
+/// Fetch the live `{group}-{grade}` ids a running daemon advertises on
+/// `/v1/models` (F14 sync). `None` = daemon unreachable or auth-refused;
+/// init then falls back to the config-derived surface (still correct,
+/// just without discovered-only grades).
+async fn fetch_live_model_ids(bind: &str) -> Option<Vec<String>> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .ok()?;
+    let resp = client
+        .get(format!("{}/v1/models", daemon_base(bind)))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let json: serde_json::Value = resp.json().await.ok()?;
+    Some(
+        json.get("data")?
+            .as_array()?
+            .iter()
+            .filter_map(|m| m.get("id")?.as_str().map(String::from))
+            .collect(),
+    )
+}
+
+/// Split a client-facing `{group}-{grade}` id against the config groups:
+/// exact bare-group match first (no grade), then `{id}-{grade}` prefix +
+/// grade-token validation on that group's ladder (group ids contain `-`,
+/// so prefix matching must be ladder-validated to stay unambiguous).
+fn split_surface_id<'a>(
+    reg: &'a Registry,
+    id: &'a str,
+) -> Option<(&'a crate::registry::Group, &'a str)> {
+    if reg.group(id).is_some() {
+        return None; // bare group id — never listed on /v1/models
+    }
+    for g in &reg.groups {
+        if let Some(gp) = id.strip_prefix(&format!("{}-", g.id)) {
+            if g.ladder.rank(gp).is_some() {
+                return Some((g, gp));
+            }
+        }
+    }
+    None
+}
+
+/// Enrich live `/v1/models` ids with config-derived metadata (context,
+/// maxTokens, reasoning). Config-known grades keep their metadata;
+/// discovered-only grades synthesize it from the grade token + group pool.
+fn enrich_live_entries(
+    reg: &Registry,
+    config_models: &[PiModel],
+    live_ids: &[String],
+) -> Vec<PiModel> {
+    let by_id: HashMap<&str, &PiModel> = config_models.iter().map(|m| (m.id.as_str(), m)).collect();
+    live_ids
+        .iter()
+        .map(|id| {
+            if let Some(m) = by_id.get(id.as_str()) {
+                return (*m).clone();
+            }
+            let (grade, pool) = split_surface_id(reg, id)
+                .map(|(g, tok)| (tok, g.pool.as_deref().unwrap_or("quota")))
+                .unwrap_or(("", "quota"));
+            PiModel {
+                id: id.clone(),
+                name: id.clone(),
+                context_window: None,
+                max_tokens: default_max_tokens(grade, pool),
+                reasoning: default_reasoning(grade),
+            }
+        })
+        .collect()
+}
+
+/// The pi picker surface: prefer the RUNNING daemon's `/v1/models` list
+/// (authoritative — includes discovered grades), enriched with the
+/// config-derived metadata; fall back to the config-derived groups when
+/// no daemon answers.
+async fn live_or_config_entries(cfg: &Config) -> Result<BTreeMap<String, Vec<PiModel>>> {
+    let config_entries = group_entries(cfg)?;
+    let config_models = config_entries.get("arouter").cloned().unwrap_or_default();
+    let Some(live_ids) = fetch_live_model_ids(&cfg.server.bind).await else {
+        return Ok(config_entries);
+    };
+    if live_ids.is_empty() {
+        return Ok(config_entries);
+    }
+    let reg = Registry::from_config(cfg, &KeyStore::default())?;
+    let models = enrich_live_entries(&reg, &config_models, &live_ids);
+    let mut out = BTreeMap::new();
+    out.insert("arouter".to_string(), models);
+    Ok(out)
+}
+
 /// systemd user unit text for this install.
 pub fn systemd_unit(bin: &Path, config: &Path) -> String {
     format!(
@@ -158,7 +272,7 @@ pub struct InitOutcome {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn run(
+pub async fn run(
     config_path: Option<PathBuf>,
     force: bool,
     install_bin: bool,
@@ -184,10 +298,12 @@ pub fn run(
             .with_context(|| format!("write {}", config.display()))?;
     }
 
-    // 2. merge pi models.json
+    // 2. merge pi models.json — the pi picker surface mirrors the RUNNING
+    // daemon's /v1/models (which includes discovered grades) when one is
+    // reachable, else the config-derived groups.
     let cfg = Config::load(Some(&config))?;
     let pi_path = home.join(".pi/agent/models.json");
-    let entries = group_entries(&cfg)?;
+    let entries = live_or_config_entries(&cfg).await?;
     let (models_json, bak) = {
         let existing = std::fs::read_to_string(&pi_path)
             .ok()
@@ -542,5 +658,60 @@ mod tests {
         assert!(u.contains("ExecStart=/home/u/.local/bin/arouter serve --config /home/u/.config/arouter/config.toml"));
         assert!(u.contains("Restart=on-failure"));
         assert!(u.contains("WantedBy=default.target"));
+    }
+
+    #[test]
+    fn daemon_base_maps_wildcard_to_loopback() {
+        assert_eq!(daemon_base("0.0.0.0:3929"), "http://127.0.0.1:3929");
+        assert_eq!(daemon_base("127.0.0.1:3929"), "http://127.0.0.1:3929");
+        assert_eq!(daemon_base("http://0.0.0.0:3929"), "http://127.0.0.1:3929");
+        assert_eq!(daemon_base("127.0.0.1"), "http://127.0.0.1:3929");
+    }
+
+    #[test]
+    fn split_surface_id_parses_group_grade_unambiguously() {
+        let cfg = cfg_with(&[("A", "quota"), ("A", "ondemand")], &[]);
+        let reg = Registry::from_config(&cfg, &KeyStore::default()).unwrap();
+        let (g, tok) = split_surface_id(&reg, "arouter-ondemand-A").expect("parses");
+        assert_eq!(g.id, "arouter-ondemand");
+        assert_eq!(tok, "A");
+        assert!(
+            split_surface_id(&reg, "arouter-ondemand").is_none(),
+            "bare id"
+        );
+        assert!(
+            split_surface_id(&reg, "arouter-ondemand-X").is_none(),
+            "bad grade"
+        );
+        assert!(split_surface_id(&reg, "arouter-subscription").is_none());
+        assert!(split_surface_id(&reg, "garbage").is_none());
+    }
+
+    #[test]
+    fn enrich_live_entries_keeps_config_metadata_and_adds_discovered() {
+        let cfg = cfg_with(&[("A+", "quota"), ("A", "ondemand")], &[]);
+        let reg = Registry::from_config(&cfg, &KeyStore::default()).unwrap();
+        let config_models = group_entries(&cfg).unwrap().remove("arouter").unwrap();
+        let live = vec![
+            "arouter-subscription-A+".to_string(),
+            "arouter-ondemand-A".to_string(),
+            "arouter-ondemand-B".to_string(), // discovered-only grade
+        ];
+        let enriched = enrich_live_entries(&reg, &config_models, &live);
+        assert_eq!(
+            enriched.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec![
+                "arouter-subscription-A+",
+                "arouter-ondemand-A",
+                "arouter-ondemand-B"
+            ]
+        );
+        // config-known entry keeps its metadata
+        assert_eq!(enriched[0].reasoning, Some(true)); // A+
+        assert_eq!(enriched[0].max_tokens, 65536);
+        // discovered-only entry synthesizes from grade token B + ondemand
+        assert_eq!(enriched[2].context_window, None);
+        assert_eq!(enriched[2].max_tokens, 65536); // ondemand cap
+        assert_eq!(enriched[2].reasoning, None); // B
     }
 }

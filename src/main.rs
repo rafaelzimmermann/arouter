@@ -154,7 +154,8 @@ async fn main() -> anyhow::Result<()> {
                 !no_unit,
                 pi_key.as_deref().unwrap_or("local"),
                 include_str!("../config.example.toml"),
-            )?;
+            )
+            .await?;
             println!("config      {}", out.config.display());
             if let Some(b) = &out.backup {
                 println!("backup      {} (models.json before merge)", b.display());
