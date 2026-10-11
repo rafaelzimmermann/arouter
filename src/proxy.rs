@@ -1062,7 +1062,34 @@ async fn relay_success(
         }
         builder.body(Body::from_stream(tap)).unwrap()
     } else {
-        let bytes = resp.bytes().await.unwrap_or_default();
+        // A 2xx whose body dies is NOT an empty success (review F4): be
+        // honest — 502 to the client, health failure, attempt recorded.
+        // No transparent retry: try_candidates already committed to this
+        // upstream when it saw the 2xx.
+        let bytes = match resp.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                st.health.record_failure(&m.id, true);
+                let rec = UsageRecord {
+                    status: "upstream_error".into(),
+                    http_status: Some(200),
+                    tokens_in: None,
+                    tokens_out: None,
+                    cost_usd: 0.0,
+                    latency_ms: t0.elapsed().as_millis() as u64,
+                    ttfb_ms: None,
+                    ..rec_meta(None, None, None, 0)
+                };
+                st.usage.record(rec.clone());
+                st.metrics.record(&rec);
+                return api_error_with(
+                    502,
+                    "upstream_error",
+                    format!("upstream body read failed: {e}"),
+                    &[(hdr::UPSTREAM, m.id.clone())],
+                );
+            }
+        };
         let (tin, tout) = extract_usage(&bytes);
         let rec = rec_meta(tin, tout, None, t0.elapsed().as_millis() as u64);
         if pool == "ondemand" {
@@ -1220,15 +1247,22 @@ impl TapStream {
         }
     }
 
+    /// Exactly-once finalization (review F4). Statuses:
+    /// - "ok": clean EOF — health success
+    /// - "aborted": downstream hung up mid-stream — the upstream WAS
+    ///   serving, so health success, but the attempt is recorded and
+    ///   any billable tokens scanned so far still spend
+    /// - "upstream_error": the upstream stream broke — health failure
+    ///   (retryable), attempt recorded
     fn finish(&mut self, status: &str) {
         if self.recorded {
             return;
         }
         self.recorded = true;
-        // a stream that completed (even if the client hung up) proves the
-        // upstream was serving — only a broken stream counts against health
-        if status == "ok" || status == "aborted" {
-            self.health.record_success(&self.meta.model);
+        match status {
+            "ok" | "aborted" => self.health.record_success(&self.meta.model),
+            "upstream_error" => self.health.record_failure(&self.meta.model, true),
+            _ => {}
         }
         let (tin, tout) = self.scan.usage();
         let rec = UsageRecord {
@@ -1272,7 +1306,7 @@ impl Stream for TapStream {
                 std::task::Poll::Ready(Some(Ok(bytes)))
             }
             std::task::Poll::Ready(Some(Err(e))) => {
-                self.finish("aborted");
+                self.finish("upstream_error");
                 std::task::Poll::Ready(Some(Err(std::io::Error::other(e.to_string()))))
             }
             std::task::Poll::Ready(None) => {
@@ -1281,6 +1315,15 @@ impl Stream for TapStream {
             }
             std::task::Poll::Pending => std::task::Poll::Pending,
         }
+    }
+}
+
+/// Client cancellation is finalization too (review F4): when hyper
+/// drops the response body, the attempt must still be recorded —
+/// exactly once (the `recorded` flag makes the explicit paths no-ops).
+impl Drop for TapStream {
+    fn drop(&mut self) {
+        self.finish("aborted");
     }
 }
 
@@ -1396,6 +1439,107 @@ impl UsageScan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::pin_mut;
+    use std::task::Poll;
+
+    /// Controllable upstream stream for lifecycle tests: yields nothing
+    /// until the test says so (review: barriers, not sleeps).
+    struct HeldStream {
+        _guard: (),
+    }
+    impl Stream for HeldStream {
+        type Item = reqwest::Result<Bytes>;
+        fn poll_next(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            std::task::Poll::Pending // never resolves: simulates a live stream
+        }
+    }
+
+    fn tap_meta() -> TapMeta {
+        TapMeta {
+            pool: "quota".into(),
+            profile: "default".into(),
+            requested: "A".into(),
+            served: "A".into(),
+            caller: "t".into(),
+            project: None,
+            model: "p/m".into(),
+            cost_in: 0.0,
+            cost_out: 0.0,
+            degraded: false,
+        }
+    }
+
+    #[test]
+    fn dropping_a_pending_stream_records_the_abort() {
+        // review F4 contract: client cancellation must record the attempt
+        let usage = Arc::new(UsageLog::in_memory());
+        let metrics = Arc::new(Metrics::new());
+        let health = crate::health::Health::new(Default::default());
+        {
+            let tap = TapStream::new(
+                HeldStream { _guard: () },
+                tap_meta(),
+                usage.clone(),
+                metrics.clone(),
+                health.clone(),
+                Instant::now(),
+            );
+            pin_mut!(tap);
+            assert!(matches!(
+                tap.as_mut().poll_next(&mut std::task::Context::from_waker(
+                    futures::task::noop_waker_ref()
+                )),
+                Poll::Pending
+            ));
+            // drop happens here — the client hung up mid-stream
+        }
+        let recs = usage.records();
+        assert_eq!(recs.len(), 1, "abort recorded");
+        assert_eq!(recs[0].status, "aborted");
+    }
+
+    #[tokio::test]
+    async fn upstream_stream_error_is_failure_not_success() {
+        // review F4 contract: a broken upstream stream must NOT count as
+        // health success
+        let usage = Arc::new(UsageLog::in_memory());
+        let metrics = Arc::new(Metrics::new());
+        let health = crate::health::Health::new(Default::default());
+        // a REAL reqwest error (connection refused) — constructing one
+        // synthetically isn't public API
+        let err = reqwest::get("http://127.0.0.1:1/x")
+            .await
+            .expect_err("nothing listens on port 1");
+        let broken = futures::stream::iter(vec![Err::<Bytes, reqwest::Error>(err)]);
+        {
+            let tap = TapStream::new(
+                broken,
+                tap_meta(),
+                usage.clone(),
+                metrics.clone(),
+                health.clone(),
+                Instant::now(),
+            );
+            pin_mut!(tap);
+            let out = tap.as_mut().poll_next(&mut std::task::Context::from_waker(
+                futures::task::noop_waker_ref(),
+            ));
+            assert!(matches!(&out, Poll::Ready(Some(Err(_)))));
+            // scope end drops the TapStream itself — the Err arm already
+            // finished, so Drop must not double-record
+        }
+        let recs = usage.records();
+        assert_eq!(recs.len(), 1, "exactly once");
+        assert_eq!(recs[0].status, "upstream_error");
+        let snap = health.snapshot();
+        assert!(
+            snap.get("p/m").is_some_and(|s| s.fail_ratio_1h > 0.0),
+            "health failure recorded"
+        );
+    }
 
     fn feed_chunks(scan: &mut UsageScan, chunks: &[&str]) -> (Option<u64>, Option<u64>) {
         for c in chunks {

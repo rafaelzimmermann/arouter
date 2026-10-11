@@ -345,11 +345,13 @@ mod tests {
     }
 
     #[test]
-    fn failed_attempts_do_not_spend() {
+    fn failed_attempts_without_usage_do_not_spend() {
         let usage = UsageLog::in_memory();
         let now = unix_now();
-        let mut r = rec(9.0, now - 60, "bob", "default");
+        // an upstream 500 bills nothing: no tokens, no cost — free
+        let mut r = rec(0.0, now - 60, "bob", "default");
         r.status = "upstream_error".into();
+        r.http_status = Some(500);
         usage.record(r);
         let cfg = cfg_with(
             BudgetConfig {
@@ -359,5 +361,26 @@ mod tests {
             None,
         );
         assert!(preflight(&usage, &cfg, "default", &alice(), 0.05).is_ok());
+    }
+
+    #[test]
+    fn billed_usage_spends_even_when_the_stream_died() {
+        // review F4: a stream that broke mid-flight AFTER emitting
+        // billable tokens still spends — the upstream will bill them
+        let usage = UsageLog::in_memory();
+        let now = unix_now();
+        let mut r = rec(0.09, now - 60, "bob", "default");
+        r.status = "aborted".into();
+        r.tokens_out = Some(1_000); // scanned before the stream died
+        usage.record(r);
+        let cfg = cfg_with(
+            BudgetConfig {
+                daily_usd: 0.10,
+                ..Default::default()
+            },
+            None,
+        );
+        let d = preflight(&usage, &cfg, "default", &alice(), 0.05).unwrap_err();
+        assert_eq!(d.window, "daily");
     }
 }

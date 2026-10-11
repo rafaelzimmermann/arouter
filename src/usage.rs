@@ -259,9 +259,13 @@ impl UsageLog {
     }
 
     pub fn records(&self) -> Vec<UsageRecord> {
-        // read back from file (best effort) — used by tests and `status`
+        // read back from file (best effort) — used by tests and `status`.
+        // In-memory logs return the live ring instead of nothing.
         let path = {
             let inner = self.inner.lock().unwrap();
+            if inner.path.is_none() {
+                return inner.ring.iter().rev().cloned().collect();
+            }
             inner.path.clone()
         };
         let Some(path) = path else { return vec![] };
@@ -276,8 +280,10 @@ impl UsageLog {
     }
 
     /// $ spent since `since_unix`, filtered by pool (required), profile
-    /// and caller (optional). Only counts successful attempts — failed
-    /// requests don't consume budget.
+    /// and caller (optional). Bills what the upstream billed: cost is
+    /// counted for EVERY record with a cost — a stream that died
+    /// mid-flight after emitting billable tokens still spends (review
+    /// F4); failed attempts with no usage carry cost 0 and stay free.
     pub fn spend_since(
         &self,
         pool: &str,
@@ -293,7 +299,7 @@ impl UsageLog {
             .filter(|r| r.pool == pool)
             .filter(|r| profile.is_none_or(|p| r.profile == p))
             .filter(|r| caller.is_none_or(|c| r.caller == c))
-            .filter(|r| r.status == "ok")
+            .filter(|r| r.cost_usd > 0.0)
             .map(|r| r.cost_usd)
             .sum()
     }
@@ -448,6 +454,7 @@ mod tests {
         let log = UsageLog::in_memory();
         log.record(rec("x/y", "ok", None, None));
         assert_eq!(log.snapshot()["requests_total"], 1);
-        assert!(log.records().is_empty());
+        // in-memory logs now serve the live ring (was: always empty)
+        assert_eq!(log.records().len(), 1);
     }
 }

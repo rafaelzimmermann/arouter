@@ -1159,6 +1159,24 @@ async fn per_caller_budget_denies_even_when_pool_allows() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
+/// 200 headers, then the body dies mid-flight (review F4 e2e).
+async fn dying_body() -> String {
+    spawn_upstream(Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            let body = Body::from_stream(futures::stream::iter(vec![
+                Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(
+                    "{\"id\":\"x\",\"choices\":[{\"message\":",
+                )),
+                Err(std::io::Error::other("body died mid-flight")),
+            ]));
+            use axum::response::IntoResponse as _;
+            ([(header::CONTENT_TYPE, "application/json")], body).into_response()
+        }),
+    ))
+    .await
+}
+
 #[tokio::test]
 async fn cross_pool_fallback_is_explicit_and_labeled() {
     let bad = bad_500().await;
@@ -1261,6 +1279,29 @@ async fn profile_empty_cross_pool_disables_paid_fallback() {
         1,
         "base profile pays once"
     );
+}
+
+#[tokio::test]
+async fn dying_body_is_never_an_empty_success() {
+    // review F4: a 200 whose body dies mid-flight must never surface as
+    // an empty successful response. Locally the truncation surfaces at
+    // send() (fail-closed 429 after the attempt is recorded); the
+    // bytes()-after-headers path additionally 502s in relay_success.
+    // Either way: NOT 200, and a failed attempt is recorded.
+    let dying = dying_body().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![model("p/m", "B", &["quota"], &dying, 1.0, (0.0, 0.0))];
+    let t = test_app(cfg);
+    let resp = post_chat(&t.app, "/v1/chat/completions", "B", false, HeaderMap::new()).await;
+    assert_ne!(resp.status(), StatusCode::OK);
+    let code = resp.status().as_u16();
+    assert!(
+        code == 429 || code == 502,
+        "expected fail-closed 429/502, got {code}"
+    );
+    let recs = t.usage.records();
+    assert_eq!(recs.len(), 1, "the dead attempt is recorded");
+    assert_ne!(recs[0].status, "ok");
 }
 
 // ─────────────────────────── anthropic wire (E7) ───────────────────────────
