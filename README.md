@@ -1,3 +1,5 @@
+<p align="center"><img src="logo.svg" width="150" alt="arouter logo — one beam routing into three grade lanes"></p>
+
 # arouter
 
 **Pick a grade, not a provider.** A quota-aware LLM agent router (Rust): expose `arouter:A+ / A / B` (plus `-local` and `-ondemand` pools) to pi and any OpenAI-compatible client, and let the daemon route each request to the best available upstream — subscriptions, free-tier quotas, local engines, or budget-guarded pay-per-token.

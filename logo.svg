@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="node" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2DD4BF"/>
+      <stop offset="1" stop-color="#3FB950"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#3FB950" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#3FB950" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- badge -->
+  <rect x="0" y="0" width="512" height="512" rx="100" fill="#0D1117"/>
+
+  <!-- input beam -->
+  <circle cx="34" cy="256" r="11" fill="#C9D1D9"/>
+  <line x1="48" y1="256" x2="188" y2="256" stroke="#C9D1D9" stroke-width="22" stroke-linecap="round" opacity="0.9"/>
+
+  <!-- glow behind node -->
+  <circle cx="256" cy="256" r="150" fill="url(#glow)"/>
+
+  <!-- router node -->
+  <polygon points="256,168 344,256 256,344 168,256" fill="url(#node)"/>
+
+  <!-- grade lanes: A+ (thick) / A / B (thin) -->
+  <line x1="272" y1="238" x2="424" y2="150" stroke="#3FB950" stroke-width="26" stroke-linecap="round"/>
+  <line x1="280" y1="256" x2="424" y2="256" stroke="#E3B341" stroke-width="17" stroke-linecap="round"/>
+  <line x1="272" y1="274" x2="424" y2="362" stroke="#58A6FF" stroke-width="10" stroke-linecap="round"/>
+
+  <!-- arrowheads -->
+  <path d="M474,150 L436,128 L436,172 Z" fill="#3FB950"/>
+  <path d="M474,256 L440,241 L440,271 Z" fill="#E3B341"/>
+  <path d="M474,362 L444,352 L444,372 Z" fill="#58A6FF"/>
+</svg>

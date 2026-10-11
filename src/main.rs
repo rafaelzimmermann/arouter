@@ -300,6 +300,7 @@ async fn serve(
     };
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;
+    print_banner(&bind, registry.models.len());
     tracing::info!(
         "arouter v{} listening on http://{bind} ({} models, {} profiles, {} callers, auth required: {})",
         env!("CARGO_PKG_VERSION"),
@@ -339,6 +340,24 @@ async fn serve(
     }
     tracing::info!("shut down cleanly");
     Ok(())
+}
+
+/// Startup banner: ANSI-shadow wordmark + boot summary, printed once the
+/// listener is bound (plain text — stays clean in journald/pipes).
+fn print_banner(bind: &str, models: usize) {
+    println!(
+        "\n █████╗ ██████╗ ██████╗ ███████╗████████╗██████╗  ██████╗ \n\
+██╔══██╗██╔══██╗██╔══██╗██╔════╝╚══██╔══╝██╔══██╗██╔═══██╗\n\
+███████║██████╔╝██████╔╝█████╗     ██║   ██████╔╝██║   ██║\n\
+██╔══██║██╔══██╗██╔══██╗██╔══╝     ██║   ██╔══██╗██║   ██║\n\
+██║  ██║██║  ██║██║  ██║███████╗   ██║   ██║  ██║╚██████╔╝\n\
+╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝ \n\
+  pick a grade, not a provider · v{v}\n\
+  listening http://{bind} · {models} models\n",
+        v = env!("CARGO_PKG_VERSION"),
+        bind = bind,
+        models = models,
+    );
 }
 
 /// Rebuilds the registry from disk + discovery and swaps it in place.
