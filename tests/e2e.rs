@@ -1495,6 +1495,184 @@ async fn body_text(resp: Response) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+/// Strict wire-shape validator (review F8): parses what arouter SENDS
+/// and rejects anything that isn't valid Chat Completions tool history —
+/// assistant-level `tool_calls`, sibling `role:"tool"` messages, no
+/// content-part tool items. Replies with a tool call so the loop can
+/// continue.
+async fn strict_tool_wire_upstream() -> String {
+    spawn_upstream(Router::new().route(
+        "/v1/chat/completions",
+        post(|body: axum::body::Bytes| async move {
+            use axum::response::IntoResponse as _;
+            let v: serde_json::Value = match serde_json::from_slice(&body) {
+                Ok(v) => v,
+                Err(_) => return (StatusCode::BAD_REQUEST, "not json").into_response(),
+            };
+            let msgs = match v.get("messages").and_then(|m| m.as_array()) {
+                Some(m) => m.clone(),
+                None => {
+                    return (StatusCode::BAD_REQUEST, "no messages[]").into_response()
+                }
+            };
+            let asst = msgs
+                .iter()
+                .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"))
+                .cloned();
+            let Some(asst) = asst else {
+                return (StatusCode::BAD_REQUEST, "no assistant turn").into_response();
+            };
+            let calls = match asst.get("tool_calls").and_then(|c| c.as_array()) {
+                Some(c) if !c.is_empty() => c.clone(),
+                _ => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "assistant turn has no message-level tool_calls",
+                    )
+                        .into_response()
+                }
+            };
+            let c0 = &calls[0];
+            if c0.get("id").and_then(|x| x.as_str()) != Some("t1")
+                || c0.get("type").and_then(|x| x.as_str()) != Some("function")
+                || c0["function"]["name"] != "get_weather"
+                || !c0["function"]["arguments"].is_string()
+            {
+                return (StatusCode::BAD_REQUEST, "malformed tool_calls entry").into_response();
+            }
+            // the tool result must be its OWN role:"tool" message
+            let tool_msgs: Vec<_> = msgs
+                .iter()
+                .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("tool"))
+                .collect();
+            match tool_msgs.as_slice() {
+                [only] if only["tool_call_id"] == "t1" && only["content"] == "sunny 22" => {}
+                _ => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!(
+                            "expected exactly one sibling role:tool message, got {tool_msgs:?}"
+                        ),
+                    )
+                        .into_response()
+                }
+            }
+            // follow-up user text must be a separate user turn, in order
+            let i_tool = msgs
+                .iter()
+                .position(|m| m["role"] == "tool")
+                .unwrap();
+            let i_follow = msgs
+                .iter()
+                .position(|m| m["role"] == "user" && m["content"] == "and tomorrow?");
+            match i_follow {
+                Some(i) if i > i_tool => {}
+                _ => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "follow-up user text missing or out of order",
+                    )
+                        .into_response()
+                }
+            }
+            // no content-part tool shapes anywhere
+            for m in &msgs {
+                if let Some(arr) = m.get("content").and_then(|c| c.as_array()) {
+                    for p in arr {
+                        if p["type"] == "tool_call" || p["type"] == "tool" {
+                            return (StatusCode::BAD_REQUEST, "content-part tool shape").into_response();
+                        }
+                    }
+                }
+            }
+            // answer with a tool call of our own (loop continuation).
+            // Honor the stream flag: the anthropic client asked for SSE
+            // when stream:true, so reply with tool_calls deltas.
+            if v.get("stream").and_then(|s| s.as_bool()) == Some(true) {
+                let sse = concat!(
+                    "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"t2\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]}}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"city\\\":\\\"sf\\\"}\"}}]}}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\n",
+                    "data: [DONE]\n\n",
+                );
+                return (
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    Body::from(sse.to_string()),
+                )
+                    .into_response();
+            }
+            (
+                [(header::CONTENT_TYPE, "application/json")],
+                Body::from(
+                    "{\"id\":\"x\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"t2\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"sf\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}",
+                ),
+            )
+                .into_response()
+        }),
+    ))
+    .await
+}
+
+/// anthropic tool-loop history (call → result → follow-up), the exact
+/// sequence pi sends during agentic work.
+fn anthropic_toolloop_body(model: &str, stream: bool) -> String {
+    format!(
+        "{{\"model\":\"{model}\",\"max_tokens\":64,\"stream\":{stream},\"messages\":[\
+{{\"role\":\"user\",\"content\":\"weather in sf?\"}},\
+{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"checking\"}},{{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"get_weather\",\"input\":{{\"city\":\"sf\"}}}}]}},\
+{{\"role\":\"user\",\"content\":[{{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"sunny 22\"}},{{\"type\":\"text\",\"text\":\"and tomorrow?\"}}]}}\
+]}}"
+    )
+}
+
+async fn post_messages_body(app: &Router, path: &str, body: String) -> Response {
+    let req = Request::post(path).body(Body::from(body)).unwrap();
+    app.clone().oneshot(req).await.unwrap()
+}
+
+#[tokio::test]
+async fn anthropic_tool_loop_survives_a_strict_openai_upstream() {
+    // review F8: call → result → follow-up history must translate into
+    // wire shapes a REAL openai-compatible upstream accepts (buffered)
+    let up = strict_tool_wire_upstream().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![model("stub/a", "A", &["quota"], &up, 1.0, (0.0, 0.0))];
+    let t = test_app(cfg);
+    let resp =
+        post_messages_body(&t.app, "/v1/messages", anthropic_toolloop_body("A", false)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_text(resp).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    // ...and the response's tool call comes back as anthropic tool_use
+    let blocks = v["content"].as_array().cloned().unwrap_or_default();
+    let tu = blocks
+        .iter()
+        .find(|b| b["type"] == "tool_use")
+        .expect("tool_use block in response");
+    assert_eq!(tu["id"], "t2");
+    assert_eq!(tu["name"], "get_weather");
+    assert_eq!(v["stop_reason"], "tool_use");
+}
+
+#[tokio::test]
+async fn anthropic_tool_loop_streams_tool_use_back() {
+    // review F8: same strict wire, streaming response path — the SSE
+    // the anthropic client receives must re-emit the tool call as a
+    // content_block_start/tool_use event stream
+    let up = strict_tool_wire_upstream().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![model("stub/a", "A", &["quota"], &up, 1.0, (0.0, 0.0))];
+    let t = test_app(cfg);
+    let resp = post_messages_body(&t.app, "/v1/messages", anthropic_toolloop_body("A", true)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        hstr(&resp, "content-type").split(';').next().unwrap(),
+        "text/event-stream"
+    );
+    let sse = body_text(resp).await;
+    assert!(sse.contains("\"type\":\"tool_use\"") || sse.contains("tool_use"));
+}
+
 #[tokio::test]
 async fn anthropic_nonstream_translates_both_ways() {
     let up = good_json().await;

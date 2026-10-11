@@ -60,8 +60,8 @@ pub fn anthropic_to_openai(v: &Value) -> Result<Value, String> {
             "assistant" => "assistant",
             _ => "user", // anthropic only has user/assistant; system is top-level
         };
-        for conv in message_variants(role, m.get("content"))? {
-            push_merged(&mut messages, conv);
+        for msg in message_variants(role, m.get("content"))? {
+            push_openai(&mut messages, msg);
         }
     }
     if messages.is_empty() {
@@ -118,18 +118,23 @@ fn system_text(v: Option<&Value>) -> Option<String> {
     }
 }
 
-/// One anthropic message can expand to several openai messages
-/// (tool_result blocks become their own user turns when they follow an
-/// assistant tool_use turn from a *different* message).
-fn message_variants(role: &str, content: Option<&Value>) -> Result<Vec<(String, Value)>, String> {
+/// One anthropic message can expand to several openai messages.
+///
+/// Tool history uses the shapes Chat Completions actually validates
+/// (review F8): `tool_use` blocks become the assistant message's
+/// top-level `tool_calls` array, and every `tool_result` becomes its
+/// own `{"role":"tool"}` message — never content-part items, which
+/// upstreams reject on the next turn of an agent's tool loop.
+fn message_variants(role: &str, content: Option<&Value>) -> Result<Vec<Value>, String> {
     match content {
-        None | Some(Value::Null) => Ok(vec![(role.into(), json!(""))]),
-        Some(Value::String(s)) => Ok(vec![(role.into(), json!(s))]),
+        None | Some(Value::Null) => Ok(vec![json!({"role": role, "content": ""})]),
+        Some(Value::String(s)) => Ok(vec![json!({"role": role, "content": s})]),
         Some(Value::Array(blocks)) => {
             let mut text: Vec<String> = Vec::new();
             let mut parts: Vec<Value> = Vec::new(); // openai content-array parts
-            let mut extra_turns: Vec<(String, Value)> = Vec::new(); // tool_result user turns
-            let mut has_non_text = false;
+            let mut tool_calls: Vec<Value> = Vec::new();
+            let mut tool_results: Vec<Value> = Vec::new();
+            let mut has_image = false;
             for b in blocks {
                 let ty = b.get("type").and_then(|t| t.as_str()).unwrap_or("");
                 match ty {
@@ -139,16 +144,17 @@ fn message_variants(role: &str, content: Option<&Value>) -> Result<Vec<(String, 
                         parts.push(json!({"type": "text", "text": t}));
                     }
                     "image" => {
-                        has_non_text = true;
+                        has_image = true;
                         if let Some(url) = image_url(b) {
                             parts.push(json!({"type": "image_url", "image_url": {"url": url}}));
                         }
                     }
                     "tool_use" => {
-                        has_non_text = true;
-                        parts.push(json!({
-                            "type": "tool_call",
+                        // message-level tool_calls entry; arguments is the
+                        // JSON-STRING form openai expects
+                        tool_calls.push(json!({
                             "id": b.get("id").cloned().unwrap_or(Value::Null),
+                            "type": "function",
                             "function": {
                                 "name": b.get("name").cloned().unwrap_or(Value::Null),
                                 "arguments": b.get("input").cloned()
@@ -157,17 +163,13 @@ fn message_variants(role: &str, content: Option<&Value>) -> Result<Vec<(String, 
                         }));
                     }
                     "tool_result" => {
-                        has_non_text = true;
-                        let inner = tool_result_content(b.get("content"));
-                        extra_turns.push((
-                            "user".into(),
-                            json!([{
-                                "type": "tool",
-                                "tool_call_id": b.get("tool_use_id").cloned()
-                                    .unwrap_or(Value::Null),
-                                "content": inner,
-                            }]),
-                        ));
+                        // its own sibling message with role "tool"
+                        tool_results.push(json!({
+                            "role": "tool",
+                            "tool_call_id": b.get("tool_use_id").cloned()
+                                .unwrap_or(Value::Null),
+                            "content": tool_result_content(b.get("content")),
+                        }));
                     }
                     "thinking"
                     | "redacted_thinking"
@@ -176,18 +178,33 @@ fn message_variants(role: &str, content: Option<&Value>) -> Result<Vec<(String, 
                     _ => {}
                 }
             }
-            let mut out: Vec<(String, Value)> = Vec::new();
-            // the main turn: plain string when it's only text (best upstream
-            // compatibility), otherwise the parts array
-            let main_content = if has_non_text {
+            if !tool_calls.is_empty() {
+                // assistant turn with tool calls: content is the text (or
+                // null when the model called without preamble)
+                let content = if text.is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(text.join("\n"))
+                };
+                return Ok(vec![json!({
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": tool_calls,
+                })]);
+            }
+            let mut out: Vec<Value> = Vec::new();
+            // tool results answer the previous assistant tool_calls turn;
+            // they must precede any same-turn user text
+            out.extend(tool_results);
+            let content = if has_image {
                 Value::Array(parts)
+            } else if text.is_empty() {
+                // tool_results only, or nothing translatable
+                return Ok(out);
             } else {
                 Value::String(text.join("\n"))
             };
-            if !(main_content.is_string() && text.is_empty()) {
-                out.push((role.into(), main_content));
-            }
-            out.extend(extra_turns);
+            out.push(json!({"role": role, "content": content}));
             Ok(out)
         }
         Some(other) => Err(format!(
@@ -253,16 +270,24 @@ fn map_tool_choice(choice: &Value) -> Option<Value> {
 
 /// OpenAI-compatible upstreams generally expect user/assistant turns to
 /// alternate; anthropic allows consecutive same-role messages. Merge
-/// consecutive same-role turns (text concat, arrays concat).
-fn push_merged(messages: &mut Vec<Value>, (role, content): (String, Value)) {
-    if let Some(last) = messages.last_mut() {
-        if last.get("role").and_then(|r| r.as_str()) == Some(role.as_str()) {
-            let merged = merge_content(last.get("content").cloned().unwrap_or(json!("")), content);
-            last["content"] = merged;
-            return;
+/// consecutive plain same-role turns (text concat, arrays concat).
+/// Tool-bearing messages (tool_calls / role:"tool") are NEVER merged —
+/// each tool result must stay addressable by tool_call_id.
+fn push_openai(messages: &mut Vec<Value>, msg: Value) {
+    let plain = msg.get("tool_calls").is_none() && msg.get("tool_call_id").is_none();
+    if plain {
+        let role = msg.get("role").cloned().unwrap_or(Value::Null);
+        let content = msg.get("content").cloned().unwrap_or(json!(""));
+        if let Some(last) = messages.last_mut() {
+            if last.get("role").and_then(|r| r.as_str()) == role.as_str() {
+                let merged =
+                    merge_content(last.get("content").cloned().unwrap_or(json!("")), content);
+                last["content"] = merged;
+                return;
+            }
         }
     }
-    messages.push(json!({"role": role, "content": content}));
+    messages.push(msg);
 }
 
 fn merge_content(a: Value, b: Value) -> Value {
@@ -759,6 +784,8 @@ mod tests {
 
     #[test]
     fn tool_use_and_tool_result_roundtrip_shapes() {
+        // review F8: the openai wire shape upstreams actually validate —
+        // assistant-level tool_calls + sibling role:"tool" messages
         let req = json!({
             "model": "A", "max_tokens": 10,
             "messages": [
@@ -766,26 +793,68 @@ mod tests {
                 {"role": "assistant", "content": [
                     {"type": "text", "text": "checking"},
                     {"type": "tool_use", "id": "t1", "name": "get_weather",
-                     "input": {"city": "sf"}}
+                     "input": {"city": "sf"}},
+                    {"type": "tool_use", "id": "t2", "name": "get_time",
+                     "input": {"tz": "pst"}}
                 ]},
                 {"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": "t1", "content": "sunny 22"}
+                    {"type": "tool_result", "tool_use_id": "t2", "content": "9:41"},
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "sunny 22"},
+                    {"type": "text", "text": "thanks"}
                 ]}
             ]
         });
         let out = anthropic_to_openai(&req).unwrap();
         let msgs = out["messages"].as_array().unwrap();
+        // assistant carries tool_calls at the message level
         assert_eq!(msgs[1]["role"], "assistant");
-        let parts = msgs[1]["content"].as_array().unwrap();
-        assert_eq!(parts[0]["type"], "text");
-        assert_eq!(parts[1]["type"], "tool_call");
-        assert_eq!(parts[1]["function"]["name"], "get_weather");
-        assert_eq!(parts[1]["function"]["arguments"], "{\"city\":\"sf\"}");
-        // tool_result becomes its own user turn with a tool part
-        assert_eq!(msgs[2]["role"], "user");
-        assert_eq!(msgs[2]["content"][0]["type"], "tool");
-        assert_eq!(msgs[2]["content"][0]["tool_call_id"], "t1");
-        assert_eq!(msgs[2]["content"][0]["content"], "sunny 22");
+        assert_eq!(msgs[1]["content"], "checking");
+        let calls = msgs[1]["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["id"], "t1");
+        assert_eq!(calls[0]["type"], "function");
+        assert_eq!(calls[0]["function"]["name"], "get_weather");
+        assert_eq!(calls[0]["function"]["arguments"], "{\"city\":\"sf\"}");
+        // each tool_result is its own sibling message with role "tool"
+        assert_eq!(msgs[2]["role"], "tool");
+        assert_eq!(msgs[2]["tool_call_id"], "t2");
+        assert_eq!(msgs[2]["content"], "9:41");
+        assert_eq!(msgs[3]["role"], "tool");
+        assert_eq!(msgs[3]["tool_call_id"], "t1");
+        assert_eq!(msgs[3]["content"], "sunny 22");
+        // same-turn user text follows the tool results
+        assert_eq!(msgs[4]["role"], "user");
+        assert_eq!(msgs[4]["content"], "thanks");
+        // no content-part tool shapes anywhere
+        for m in msgs {
+            if let Some(arr) = m["content"].as_array() {
+                for p in arr {
+                    assert_ne!(p["type"], "tool_call");
+                    assert_ne!(p["type"], "tool");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tool_only_assistant_turn_has_null_content() {
+        let req = json!({
+            "model": "A", "max_tokens": 10,
+            "messages": [
+                {"role": "user", "content": "go"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t9", "name": "act", "input": {}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t9", "content": ""}
+                ]}
+            ]
+        });
+        let out = anthropic_to_openai(&req).unwrap();
+        let msgs = out["messages"].as_array().unwrap();
+        assert_eq!(msgs[1]["content"], Value::Null);
+        assert_eq!(msgs[1]["tool_calls"][0]["function"]["arguments"], "{}");
+        assert_eq!(msgs[2]["role"], "tool");
     }
 
     #[test]
