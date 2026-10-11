@@ -752,16 +752,16 @@ async fn profile_exclusivity_and_routing() {
         .await
         .unwrap();
     let body = body_string(resp).await;
-    assert!(body.contains("\"A+\""), "{body}");
+    assert!(body.contains("\"arouter-subscription\""), "{body}");
 }
 
 #[tokio::test]
-async fn models_endpoint_lists_grades_with_models() {
+async fn models_endpoint_lists_routing_groups() {
     let up = good_json().await;
     let mut cfg = Config::default();
     cfg.models = vec![
         model("zai/glm-5.3", "A+", &["quota"], &up, 1.0, (0.0, 0.0)),
-        model("zai/glm-5.3-flash", "B", &["quota"], &up, 1.0, (0.0, 0.0)),
+        model("strata/qwen3.8", "B", &["local"], &up, 1.0, (0.0, 0.0)),
     ];
     let t = test_app(cfg);
 
@@ -773,12 +773,87 @@ async fn models_endpoint_lists_grades_with_models() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_string(resp).await;
-    assert!(body.contains("\"A+\""));
-    assert!(body.contains("\"B\""));
+    // groups with models are listed — pools without models are not
+    assert!(body.contains("\"arouter-subscription\""), "{body}");
+    assert!(body.contains("\"arouter-local\""), "{body}");
     assert!(
-        !body.contains("\"A\""),
-        "grade without models must be absent: {body}"
+        !body.contains("\"arouter-ondemand\""),
+        "group without models must be absent: {body}"
     );
+    // grades are no longer advertised
+    assert!(!body.contains("\"A+\""), "{body}");
+}
+
+#[tokio::test]
+async fn routing_groups_bare_grade_pinned_and_fallback() {
+    let up = good_json().await;
+    let mut cfg = Config::default();
+    // one quota model at A, one local model at B; the default group
+    // config falls subscription back to local
+    cfg.models = vec![
+        model("zai/glm-5.3", "A", &["quota"], &up, 1.0, (0.0, 0.0)),
+        model("strata/qwen3.8", "B", &["local"], &up, 1.0, (0.0, 0.0)),
+    ];
+    let t = test_app(cfg);
+
+    // bare group: whole ladder — the quota model serves (A before B)
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-subscription",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(hstr(&resp, "x-arouter-pool"), "quota");
+    // whole-ladder serve below the top grade is routing, not degradation
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-local",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(hstr(&resp, "x-arouter-pool"), "local");
+
+    // grade pinned inside the group
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-local:B",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(hstr(&resp, "x-arouter-pool"), "local");
+
+    // unknown grade inside a known group
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-local:Z9",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // unknown group falls through to the grade parser → 400 with the
+    // group list in the message
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-nope",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(body_string(resp).await.contains("arouter-subscription"));
 }
 
 #[tokio::test]

@@ -33,6 +33,28 @@ require = false
 [grades]
 ladder = ["A+", "A", "B", "C"]
 
+# Client-facing routing groups — the models `/v1/models` lists and
+# clients pick. `arouter-subscription` = every quota-pool model at its
+# configured grade, falling back to local when the pool can't serve;
+# requests send the bare id (whole ladder — the routing strategy picks
+# the upstream) or `id:GRADE` to pin a grade (e.g. "arouter-ondemand:A").
+# Member-form groups are equally valid: members = ["y/super", ...] with
+# optional per-member grades = { "y/super" = "A+" } overrides and a
+# group-local ladder. Define none and these three defaults apply.
+[[groups]]
+id = "arouter-subscription"
+pool = "quota"
+fallback = ["local"]
+
+[[groups]]
+id = "arouter-local"
+pool = "local"
+
+[[groups]]
+id = "arouter-ondemand"
+pool = "ondemand"
+fallback = ["local"]
+
 # Upstream deadlines (review F5): a connected but stalled upstream must
 # never block failover. headers_secs bounds waiting for response headers;
 # idle_secs bounds gaps between body reads (SSE chunk gaps included);
