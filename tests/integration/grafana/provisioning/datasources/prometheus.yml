@@ -1,0 +1,11 @@
+# Grafana datasource for the E9 rig: the rig's Prometheus, fixed uid so
+# the provisioned dashboard's ${DS_PROMETHEUS} variable resolves.
+apiVersion: 1
+datasources:
+  - name: arouter-prom
+    uid: arouter-prom
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

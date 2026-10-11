@@ -1,0 +1,95 @@
+# arouter configuration for the Docker integration rig (tests/integration/).
+# Upstreams are stub containers with runtime-flippable behavior; the quota
+# watcher polls the aitop stub. See run.sh for the routing matrix.
+#
+# Stub roles:
+#   stub-a → stuba/alpha   A+ quota          (provider_map → codex panel)
+#          → stuba/two     A  quota, w=1.0    (drain-test peer of stubb/beta)
+#   stub-b → stubb/beta    A  quota          (provider_map → zai panel)
+#   stub-c → stubc/gamma   B  quota + local
+#   stub-d → stubd/delta   A  ondemand (priced over the per-request cap)
+#          → stubd/zeta    A  ondemand (cheap — passes every guard)
+
+[server]
+bind = "0.0.0.0:3929"
+
+[auth]
+require = true
+
+[[callers]]
+name    = "alice"
+project = "it"
+key     = "key:it-alice-key"
+
+[[callers]]
+name = "frugal"
+key  = "key:it-frugal-key"
+# tight personal cap: cheapest ondemand estimate (~$0.004) is over it
+budget_usd_day = 0.001
+
+[grades]
+ladder = ["A+", "A", "B"]
+
+[routing]
+discovery_interval_secs = 0
+
+[routing.fallback]
+cross_pool = ["ondemand"]
+
+[quota_watcher]
+command = "curl -s http://aitop:80/quotas.json"
+interval_secs = 2
+provider_map = { "stuba" = "codex", "stubb" = "zai" }
+
+[pool.ondemand]
+preference = "cheapest"
+# delta est ≈ $0.0615 > per_request cap → skipped; zeta est ≈ $0.0004 passes
+budget = { daily_usd = 100.0, per_request_usd = 0.01 }
+
+[[models]]
+id       = "stuba/alpha"
+grade    = "A+"
+pool     = ["quota"]
+weight   = 1.5
+base_url = "http://stub-a:9000/v1"
+auth     = "none"
+
+[[models]]
+id       = "stuba/two"
+grade    = "A"
+pool     = ["quota"]
+base_url = "http://stub-a:9000/v1"
+auth     = "none"
+
+[[models]]
+id       = "stubb/beta"
+grade    = "A"
+pool     = ["quota"]
+base_url = "http://stub-b:9000/v1"
+auth     = "none"
+
+[[models]]
+id       = "stubc/gamma"
+grade    = "B"
+pool     = ["quota", "local"]
+weight   = 0.5
+base_url = "http://stub-c:9000/v1"
+auth     = "none"
+
+[[models]]
+id       = "stubd/delta"
+grade    = "A"
+pool     = ["ondemand"]
+base_url = "http://stub-d:9000/v1"
+auth     = "none"
+cost_in  = 5.0
+cost_out = 15.0
+
+[[models]]
+id       = "stubd/zeta"
+grade    = "A"
+pool     = ["ondemand"]
+base_url = "http://stub-d:9000/v1"
+auth     = "none"
+cost_in  = 0.01
+cost_out = 1.0

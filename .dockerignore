@@ -1,0 +1,6 @@
+target/
+.git/
+tests/
+docs/
+*.md
+grades.auto.toml

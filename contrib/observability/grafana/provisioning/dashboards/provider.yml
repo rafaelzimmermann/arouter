@@ -1,0 +1,11 @@
+# Grafana dashboard provider for the live stack: loads
+# contrib/grafana-dashboard.json from the bind mount below.
+apiVersion: 1
+providers:
+  - name: arouter
+    folder: ""
+    type: file
+    disableDeletion: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

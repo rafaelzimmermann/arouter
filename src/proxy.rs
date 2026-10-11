@@ -1,0 +1,1452 @@
+//! HTTP layer: axum server, OpenAI-completions proxy with SSE passthrough,
+//! per-caller identity, failover across the attempt list, Prometheus
+//! `/metrics`, and `X-Arouter-*` observability headers.
+
+use crate::budget;
+use crate::config::{CallerIdentity, CallerMap, Config};
+use crate::health::Health;
+use crate::metrics::{self, Metrics};
+use crate::quota;
+use crate::registry::{Model, Registry};
+use crate::usage::{unix_now, UsageLog, UsageRecord};
+use axum::body::{Body, Bytes};
+use axum::extract::{Path, State};
+use axum::http::{header, HeaderMap, HeaderName, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use futures::Stream;
+use std::pin::Pin;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
+
+// Response header names (lowercase wire form; keep the 'r' in "arouter"!).
+mod hdr {
+    use axum::http::HeaderName;
+
+    pub const UPSTREAM: HeaderName = HeaderName::from_static("x-arouter-upstream");
+    pub const POOL: HeaderName = HeaderName::from_static("x-arouter-pool");
+    pub const GRADE: HeaderName = HeaderName::from_static("x-arouter-grade");
+    pub const DEGRADED: HeaderName = HeaderName::from_static("x-arouter-degraded");
+    pub const PROFILE: HeaderName = HeaderName::from_static("x-arouter-profile");
+    pub const CALLER: HeaderName = HeaderName::from_static("x-arouter-caller");
+    pub const PROJECT: HeaderName = HeaderName::from_static("x-arouter-project");
+    pub const COST: HeaderName = HeaderName::from_static("x-arouter-cost-usd");
+    pub const BUDGET_REMAINING: HeaderName =
+        HeaderName::from_static("x-arouter-budget-remaining-today");
+    pub const CROSS_POOL: HeaderName = HeaderName::from_static("x-arouter-cross-pool");
+}
+
+// Request headers for open-mode caller identification.
+mod req_hdr {
+    use axum::http::HeaderName;
+
+    pub const USER: HeaderName = HeaderName::from_static("x-arouter-user");
+    pub const PROJECT: HeaderName = HeaderName::from_static("x-arouter-project");
+    pub const API_KEY: HeaderName = HeaderName::from_static("x-api-key");
+}
+
+pub const METRICS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
+
+#[derive(Clone)]
+pub struct AppState {
+    pub cfg: Arc<Config>,
+    /// Hot-reloadable registry (SIGHUP / config mtime / discovery);
+    /// readers take an `Arc` snapshot via [`AppState::reg`].
+    pub registry: Arc<RwLock<Arc<Registry>>>,
+    pub usage: Arc<UsageLog>,
+    pub callers: Arc<CallerMap>,
+    pub metrics: Arc<Metrics>,
+    pub health: Arc<Health>,
+    /// aitop-derived quota state, swapped by the watcher task (E3).
+    pub quota: Arc<quota::QuotaWatcher>,
+    /// registry provider prefix → aitop panel name.
+    pub provider_map: Arc<quota::ProviderMap>,
+    /// ollama/llama.cpp residency + busy state (E8).
+    pub local: Arc<crate::localeng::LocalEngines>,
+    /// warm-cache stickiness for the local pool (E8).
+    pub sticky: Arc<crate::localeng::StickyMap>,
+    pub http: reqwest::Client,
+    pub started: Instant,
+}
+
+impl AppState {
+    /// Current registry snapshot — always bind `let reg = st.reg();`
+    /// before `attempt_list` (it returns refs borrowed from the registry).
+    pub fn reg(&self) -> Arc<Registry> {
+        self.registry.read().unwrap().clone()
+    }
+}
+
+pub fn client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .build()
+        .expect("reqwest client")
+}
+
+pub fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/v1/chat/completions", post(chat_base))
+        .route("/local/v1/chat/completions", post(chat_local))
+        .route("/ondemand/v1/chat/completions", post(chat_ondemand))
+        .route("/{profile}/v1/chat/completions", post(chat_profile))
+        .route(
+            "/{profile}/{pool}/v1/chat/completions",
+            post(chat_profile_pool),
+        )
+        .route("/v1/messages", post(messages_base))
+        .route("/local/v1/messages", post(messages_local))
+        .route("/ondemand/v1/messages", post(messages_ondemand))
+        .route("/{profile}/v1/messages", post(messages_profile))
+        .route("/{profile}/{pool}/v1/messages", post(messages_profile_pool))
+        .route("/v1/models", get(models_base))
+        .route("/local/v1/models", get(models_local))
+        .route("/ondemand/v1/models", get(models_ondemand))
+        .route("/{profile}/v1/models", get(models_profile))
+        .route("/{profile}/{pool}/v1/models", get(models_profile_pool))
+        .route("/status.json", get(status))
+        .route("/healthz", get(healthz))
+        .route("/metrics", get(metrics_scrape))
+        .with_state(state)
+}
+
+// ─────────────────────────── thin handlers ───────────────────────────
+
+async fn chat_base(State(st): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    handle_chat(st, "default", "quota", &headers, body, Wire::OpenAi).await
+}
+async fn chat_local(State(st): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    handle_chat(st, "default", "local", &headers, body, Wire::OpenAi).await
+}
+async fn chat_ondemand(State(st): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    handle_chat(st, "default", "ondemand", &headers, body, Wire::OpenAi).await
+}
+async fn chat_profile(
+    State(st): State<AppState>,
+    Path(profile): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Some(resp) = path_profile_guard(&profile) {
+        return resp;
+    }
+    handle_chat(st, &profile, "quota", &headers, body, Wire::OpenAi).await
+}
+async fn chat_profile_pool(
+    State(st): State<AppState>,
+    Path((profile, pool)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Some(resp) = path_profile_guard(&profile) {
+        return resp;
+    }
+    handle_chat(st, &profile, &pool, &headers, body, Wire::OpenAi).await
+}
+
+async fn messages_base(State(st): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    handle_chat(st, "default", "quota", &headers, body, Wire::Anthropic).await
+}
+async fn messages_local(State(st): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    handle_chat(st, "default", "local", &headers, body, Wire::Anthropic).await
+}
+async fn messages_ondemand(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    handle_chat(st, "default", "ondemand", &headers, body, Wire::Anthropic).await
+}
+async fn messages_profile(
+    State(st): State<AppState>,
+    Path(profile): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Some(resp) = path_profile_guard(&profile) {
+        return resp;
+    }
+    handle_chat(st, &profile, "quota", &headers, body, Wire::Anthropic).await
+}
+async fn messages_profile_pool(
+    State(st): State<AppState>,
+    Path((profile, pool)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Some(resp) = path_profile_guard(&profile) {
+        return resp;
+    }
+    handle_chat(st, &profile, &pool, &headers, body, Wire::Anthropic).await
+}
+
+async fn models_base(State(st): State<AppState>) -> Response {
+    list_models(st, "default", "quota").await
+}
+async fn models_local(State(st): State<AppState>) -> Response {
+    list_models(st, "default", "local").await
+}
+async fn models_ondemand(State(st): State<AppState>) -> Response {
+    list_models(st, "default", "ondemand").await
+}
+async fn models_profile(State(st): State<AppState>, Path(profile): Path<String>) -> Response {
+    if let Some(resp) = path_profile_guard(&profile) {
+        return resp;
+    }
+    list_models(st, &profile, "quota").await
+}
+async fn models_profile_pool(
+    State(st): State<AppState>,
+    Path((profile, pool)): Path<(String, String)>,
+) -> Response {
+    if let Some(resp) = path_profile_guard(&profile) {
+        return resp;
+    }
+    list_models(st, &profile, &pool).await
+}
+
+async fn healthz() -> impl IntoResponse {
+    (StatusCode::OK, "ok")
+}
+
+async fn status(State(st): State<AppState>) -> Response {
+    let reg = st.reg();
+    let snap = st.usage.snapshot();
+    let health: serde_json::Map<String, serde_json::Value> = st
+        .health
+        .snapshot()
+        .into_iter()
+        .map(|(id, s)| {
+            (
+                id,
+                serde_json::json!({
+                    "state": format!("{:?}", s.state).to_lowercase(),
+                    "secs_left": s.secs_left,
+                    "samples_1h": s.samples_1h,
+                    "fail_ratio_1h": (s.fail_ratio_1h * 100.0).round() / 100.0,
+                }),
+            )
+        })
+        .collect();
+    let mut root = serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "uptime_secs": st.started.elapsed().as_secs(),
+        "bind": st.cfg.server.bind,
+        "auth_required": st.cfg.auth.require,
+        "pools": crate::config::POOLS,
+        "profiles": reg
+            .profiles
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::json!({ "description": v.description })))
+            .collect::<serde_json::Map<String, serde_json::Value>>(),
+        "models": reg
+            .models
+            .iter()
+            .map(|m| serde_json::json!({
+                "id": m.id,
+                "grade": reg.ladder.token(m.grade_rank),
+                "pools": m.pools,
+                "base_url": m.base_url,
+                "weight": m.weight,
+                "profiles": m.profiles,
+                "provenance": m.provenance,
+            }))
+            .collect::<Vec<_>>(),
+        "health": health,
+    });
+    // E3: quota snapshot — panel windows + computed availability.
+    let q = st.quota.current();
+    let now = crate::quota::unix_now();
+    let snap_stale = q.is_stale(now);
+    let providers: serde_json::Map<String, serde_json::Value> = q
+        .providers
+        .iter()
+        .map(|(panel, ps)| {
+            let avail = crate::quota::provider_availability(Some(ps), snap_stale, now);
+            (
+                panel.clone(),
+                serde_json::json!({
+                    "stale": ps.stale,
+                    "error": ps.error,
+                    "availability": (avail.score * 1000.0).round() / 1000.0,
+                    "notes": avail.notes,
+                    "windows": ps.windows.iter().map(|w| serde_json::json!({
+                        "label": w.label,
+                        "pct": (w.pct * 1000.0).round() / 1000.0,
+                        "reset_in_secs": w.reset_unix.map(|t| t.saturating_sub(now)),
+                    })).collect::<Vec<_>>(),
+                }),
+            )
+        })
+        .collect();
+    if let Some(root_obj) = root.as_object_mut() {
+        root_obj.insert(
+            "quota".into(),
+            serde_json::json!({
+                "fetched_unix": q.fetched_unix,
+                "stale": snap_stale,
+                "providers": providers,
+                // explicit aliases (config `[quota_watcher].provider_map`);
+                // the monitor uses them to attach models to quota panels
+                "provider_map": st.provider_map.explicit,
+            }),
+        );
+    }
+    if let (Some(root_obj), Some(snap_obj)) = (root.as_object_mut(), snap.as_object()) {
+        for (k, v) in snap_obj {
+            root_obj.insert(k.clone(), v.clone());
+        }
+    }
+    // E8: local-engine residency snapshot (monitor + debugging)
+    {
+        let l = st.local.current();
+        if let Some(root_obj) = root.as_object_mut() {
+            root_obj.insert(
+                "local_engines".into(),
+                serde_json::json!({
+                    "fetched_unix": l.fetched_unix,
+                    "stale": l.stale,
+                    "engines": l.engines.iter().map(|e| serde_json::json!({
+                        "url": e.url,
+                        "kind": e.kind.as_str(),
+                        "busy": e.busy,
+                        "loaded": e.loaded.iter().map(|(name, lm)| (
+                            name.clone(),
+                            serde_json::json!({
+                                "size_vram": lm.size_vram,
+                                "expires_unix": lm.expires_unix,
+                            })
+                        )).collect::<serde_json::Map<String, serde_json::Value>>(),
+                    })).collect::<Vec<_>>(),
+                }),
+            );
+        }
+    }
+    Json(root).into_response()
+}
+
+async fn metrics_scrape(State(st): State<AppState>) -> Response {
+    let m = &st.metrics;
+    m.gauge_set(
+        metrics::N_BUILD_INFO,
+        metrics::H_BUILD_INFO,
+        &[("version", env!("CARGO_PKG_VERSION").to_string())],
+        1.0,
+    );
+    m.gauge_set(
+        metrics::N_UPTIME,
+        metrics::H_UPTIME,
+        &[],
+        st.started.elapsed().as_secs_f64(),
+    );
+    let reg = st.reg();
+    let mut profiles: Vec<&str> = vec!["default"];
+    profiles.extend(reg.profiles.keys().map(|s| s.as_str()));
+    for p in profiles {
+        for pool in crate::config::POOLS {
+            for rank in 0..reg.ladder.grades.len() {
+                m.gauge_set(
+                    metrics::N_MODELS,
+                    metrics::H_MODELS,
+                    &[
+                        ("profile", p.to_string()),
+                        ("pool", pool.to_string()),
+                        ("grade", reg.ladder.token(rank).to_string()),
+                    ],
+                    reg.count_exact(p, pool, rank) as f64,
+                );
+            }
+        }
+    }
+    // E3: quota gauges — window pct per provider + staleness.
+    let q = st.quota.current();
+    for (panel, ps) in &q.providers {
+        for w in &ps.windows {
+            m.gauge_set(
+                metrics::N_QUOTA_WINDOW,
+                metrics::H_QUOTA_WINDOW,
+                &[("provider", panel.clone()), ("window", w.label.clone())],
+                w.pct,
+            );
+        }
+        m.gauge_set(
+            metrics::N_QUOTA_STALE,
+            metrics::H_QUOTA_STALE,
+            &[("provider", panel.clone())],
+            f64::from(u8::from(ps.stale)),
+        );
+        let now = quota::unix_now();
+        let secs = quota::draining(Some(ps), now)
+            .map(|w| (w.reset_unix.unwrap_or(now).saturating_sub(now)) as f64)
+            .unwrap_or(-1.0);
+        m.gauge_set(
+            metrics::N_QUOTA_DRAIN_RESET,
+            metrics::H_QUOTA_DRAIN_RESET,
+            &[("provider", panel.clone())],
+            secs,
+        );
+    }
+    ([(header::CONTENT_TYPE, METRICS_CONTENT_TYPE)], m.render()).into_response()
+}
+
+// ───────────────────────────── core proxy ─────────────────────────────
+
+/// Profiles in the URL path may not use reserved names (`default` is the
+/// base path; `local`/`ondemand` are pool paths).
+fn path_profile_guard(profile: &str) -> Option<Response> {
+    crate::config::RESERVED_PROFILES
+        .contains(&profile)
+        .then(|| {
+            api_error(
+                404,
+                "reserved_profile",
+                format!("{profile:?} is reserved; use the base paths"),
+            )
+        })
+}
+
+/// Extract the bearer token from `Authorization: Bearer …` or `X-Api-Key`.
+fn bearer_of(headers: &HeaderMap) -> Option<String> {
+    if let Some(v) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    {
+        let tok = v
+            .strip_prefix("Bearer ")
+            .or_else(|| v.strip_prefix("bearer "))
+            .map(str::trim);
+        if let Some(t) = tok.filter(|t| !t.is_empty()) {
+            return Some(t.to_string());
+        }
+    }
+    headers
+        .get(&req_hdr::API_KEY)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(String::from)
+}
+
+fn hdr_str<'a>(headers: &'a HeaderMap, name: &HeaderName) -> Option<&'a str> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+}
+
+/// Resolve the caller identity for a request (see docs/architecture.md
+/// §Callers): bearer key → `[[callers]]` entry; open mode falls back to
+/// `X-Arouter-User`/`X-Arouter-Project` headers, else anonymous.
+/// Err = rejection message (401).
+fn resolve_caller(st: &AppState, headers: &HeaderMap) -> Result<CallerIdentity, String> {
+    let bearer = bearer_of(headers);
+    st.callers.resolve(
+        bearer.as_deref(),
+        hdr_str(headers, &req_hdr::USER),
+        hdr_str(headers, &req_hdr::PROJECT),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_chat(
+    st: AppState,
+    profile: &str,
+    pool: &str,
+    headers: &HeaderMap,
+    body: Bytes,
+    wire: Wire,
+) -> Response {
+    let t0 = Instant::now();
+    let _in_flight = st.metrics.in_flight();
+    let caller = match resolve_caller(&st, headers) {
+        Ok(c) => c,
+        Err(msg) => return wire_error(wire, 401, "unauthorized", msg),
+    };
+    if !crate::config::POOLS.contains(&pool) {
+        return wire_error(
+            wire,
+            404,
+            "unknown_pool",
+            format!("{pool:?} (valid: {:?})", crate::config::POOLS),
+        );
+    }
+    let reg = st.reg();
+    if profile != "default" && !reg.profiles.contains_key(profile) {
+        let known: Vec<&str> = reg.profiles.keys().map(|s| s.as_str()).collect();
+        return wire_error(
+            wire,
+            404,
+            "unknown_profile",
+            format!("{profile:?} (configured: {known:?})"),
+        );
+    }
+
+    let mut payload: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return wire_error(wire, 400, "invalid_json", format!("request body: {e}")),
+    };
+    // E7: anthropic-wire clients get translated in, translated back out;
+    // routing/quota/budget/health all operate on the openai payload.
+    if wire == Wire::Anthropic {
+        payload = match crate::translate::anthropic_to_openai(&payload) {
+            Ok(v) => v,
+            Err(e) => return wire_error(wire, 400, "invalid_request", e),
+        };
+    }
+    let raw_model = payload
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let Some(req) = reg.ladder.parse_request(&raw_model) else {
+        return wire_error(
+            wire,
+            400,
+            "unknown_grade",
+            format!(
+                "model {raw_model:?}: not a grade; valid: {}",
+                reg.ladder.list()
+            ),
+        );
+    };
+    let is_stream = payload
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // E3/E4: quota + context + budget aware candidate set
+    // (routing.md §1/§3). `pre` keeps every health-ok candidate (even
+    // quota-exhausted) so the 429 can quote a reset-aware Retry-After.
+    let est = quota::estimate_request(&payload);
+    let qstate = st.quota.current();
+    let build_candidates = |pool: &str| -> (Vec<&Model>, Vec<&Model>) {
+        let pre: Vec<&Model> = reg
+            .attempt_list(profile, pool, &req)
+            .into_iter()
+            .filter(|m| !st.health.is_excluded(&m.id))
+            .filter(|m| quota::context_fits(m, &est))
+            .collect();
+        // cheapest-first only for ondemand without a manual/fastest override
+        let mode = if pool == "ondemand" {
+            match reg.pool_preference.get("ondemand").map(String::as_str) {
+                Some("manual") | Some("fastest") => quota::OrderMode::QuotaPool,
+                _ => quota::OrderMode::Cheapest,
+            }
+        } else {
+            quota::OrderMode::QuotaPool
+        };
+        let ordered = quota::order_candidates(
+            &qstate,
+            &st.health,
+            &st.provider_map,
+            mode,
+            &est,
+            pre.clone(),
+        )
+        .into_iter()
+        .filter(|m| quota::model_available(&qstate, &st.provider_map, m))
+        .collect();
+        // E8: residency boost (loaded local models float within their
+        // grade), then warm-cache stickiness for the local pool.
+        let mut ordered = crate::localeng::boost_residency(ordered, &st.local.current());
+        if pool == "local" {
+            ordered = crate::localeng::boost_sticky(ordered, &st.sticky, &caller.name);
+        }
+        (ordered, pre)
+    };
+
+    let (candidates, pre) = build_candidates(pool);
+    let mut final_err: Option<AttemptErr> = None;
+    if !candidates.is_empty() {
+        match try_candidates(
+            &st,
+            &caller,
+            profile,
+            pool,
+            &raw_model,
+            &req,
+            is_stream,
+            &mut payload,
+            &est,
+            &candidates,
+            None,
+            wire,
+            t0,
+        )
+        .await
+        {
+            Ok(r) => return r,
+            Err(e) => final_err = Some(e),
+        }
+    }
+
+    // Cross-pool fallback: explicit opt-in only (routing.md §2) — the
+    // guard against surprise charges. Targets still pass their own
+    // budget preflight inside try_candidates.
+    let cross: Vec<String> = reg
+        .profiles
+        .get(profile)
+        .map(|p| p.fallback.cross_pool.clone())
+        .unwrap_or_else(|| reg.base_fallback.cross_pool.clone());
+    for target in cross {
+        if target == pool || !crate::config::POOLS.contains(&target.as_str()) {
+            continue;
+        }
+        let (tcands, _) = build_candidates(&target);
+        if tcands.is_empty() {
+            continue;
+        }
+        tracing::info!(from = pool, to = %target, "cross-pool fallback");
+        match try_candidates(
+            &st,
+            &caller,
+            profile,
+            &target,
+            &raw_model,
+            &req,
+            is_stream,
+            &mut payload,
+            &est,
+            &tcands,
+            Some(pool),
+            wire,
+            t0,
+        )
+        .await
+        {
+            Ok(r) => return r,
+            Err(e) => final_err = Some(e),
+        }
+    }
+
+    st.metrics.record_exhausted(
+        pool,
+        profile,
+        &caller.name,
+        caller.project.as_deref(),
+        &raw_model,
+    );
+    // Budget denial outranks generic exhaustion (E4): the caller asked
+    // for a chargeable pool and the guard said no.
+    if let Some(e) = &final_err {
+        if let Some(d) = &e.denial {
+            if e.denials == e.attempts {
+                return budget_error(d, profile, &raw_model, wire);
+            }
+        }
+    }
+    let retry = quota::nearest_retry_unix(&qstate, &st.provider_map, &pre)
+        .map(|t| t.saturating_sub(quota::unix_now()).max(1))
+        .filter(|s| *s > 0);
+    let mut extra: Vec<(header::HeaderName, String)> = vec![];
+    if let Some(secs) = retry {
+        extra.push((header::RETRY_AFTER, secs.to_string()));
+    }
+    let detail = final_err
+        .map(|e| e.last_error)
+        .unwrap_or_else(|| "no candidates".into());
+    if wire == Wire::Anthropic {
+        let mut resp = wire_error(
+            wire,
+            429,
+            "arouter_exhausted",
+            format!("grade {raw_model} in pool {pool} (profile {profile}) exhausted: {detail}"),
+        );
+        if let Some(secs) = retry {
+            if let Ok(hv) = header::HeaderValue::from_str(&secs.to_string()) {
+                resp.headers_mut().insert(header::RETRY_AFTER, hv);
+            }
+        }
+        return resp;
+    }
+    api_error_with(
+        429,
+        "arouter_exhausted",
+        format!("grade {raw_model} in pool {pool} (profile {profile}) exhausted: {detail}"),
+        &extra,
+    )
+}
+
+/// Why an attempt list produced no response.
+struct AttemptErr {
+    last_error: String,
+    /// Last budget denial, if any (only reported as 402 when it was the
+    /// reason every attempt was skipped).
+    denial: Option<budget::Denial>,
+    attempts: usize,
+    denials: usize,
+}
+
+/// Walk an ordered candidate list: budget preflight (ondemand), then one
+/// upstream attempt per candidate with health recording and failover.
+/// `pool` is the *serving* pool (differs from the request pool during
+/// cross-pool fallback; `cross_from` names the origin then).
+#[allow(clippy::too_many_arguments)]
+async fn try_candidates(
+    st: &AppState,
+    caller: &CallerIdentity,
+    profile: &str,
+    pool: &str,
+    raw_model: &str,
+    req: &crate::grades::GradeRequest,
+    is_stream: bool,
+    payload: &mut serde_json::Value,
+    est: &quota::RequestEstimate,
+    candidates: &[&Model],
+    cross_from: Option<&str>,
+    wire: Wire,
+    t0: Instant,
+) -> Result<Response, AttemptErr> {
+    let mut err = AttemptErr {
+        last_error: String::from("all candidates failed"),
+        denial: None,
+        attempts: 0,
+        denials: 0,
+    };
+    for m in candidates {
+        // E4: on-demand spend guards before every chargeable attempt.
+        if pool == "ondemand" {
+            let est_usd = quota::est_cost(m, est);
+            if let Err(d) = budget::preflight(&st.usage, &st.cfg, profile, caller, est_usd) {
+                tracing::info!(
+                    model = m.id,
+                    layer = d.layer,
+                    window = d.window,
+                    "budget preflight skip (est ${:.4}, spent ${:.4}, cap ${:.4})",
+                    d.est,
+                    d.spent,
+                    d.cap
+                );
+                // keep the FIRST (cheapest-candidate) denial: it names the
+                // guard that stopped the model the caller would have gotten
+                // — later, pricier candidates' denials are less actionable
+                if err.denial.is_none() {
+                    err.denial = Some(d);
+                }
+                err.last_error = format!(
+                    "{}: budget {} {}",
+                    m.id,
+                    err.denial.as_ref().unwrap().layer,
+                    err.denial.as_ref().unwrap().window
+                );
+                err.attempts += 1;
+                err.denials += 1;
+                continue;
+            }
+        }
+        payload["model"] = serde_json::Value::String(m.upstream_name.clone());
+        let url = format!("{}/chat/completions", m.base_url);
+        let mut rb = st.http.post(&url).json(&payload);
+        if let Some(key) = &m.api_key {
+            rb = rb.bearer_auth(key);
+        }
+        match rb.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let degraded = m.grade_rank != req.ceiling;
+                st.health.record_success(&m.id);
+                return Ok(relay_success(
+                    st, m, caller, profile, pool, raw_model, degraded, is_stream, resp, t0, est,
+                    cross_from, wire,
+                )
+                .await);
+            }
+            Ok(resp) => {
+                let code = resp.status().as_u16();
+                let body_text = truncate(&resp.text().await.unwrap_or_default(), 300);
+                let msg = format!("upstream {code}: {body_text}");
+                record_failure(
+                    st,
+                    m,
+                    caller,
+                    profile,
+                    pool,
+                    raw_model,
+                    "upstream_error",
+                    Some(code),
+                    &msg,
+                    t0.elapsed().as_millis() as u64,
+                );
+                if retryable(code) {
+                    tracing::warn!(model = m.id, "retryable failure: {msg}");
+                    st.health.record_failure(&m.id, true);
+                    err.last_error = format!("{}: {msg}", m.id);
+                    err.attempts += 1;
+                    continue;
+                }
+                st.health.record_failure(&m.id, false);
+                return Ok(wire_error(
+                    wire,
+                    code,
+                    "upstream_error",
+                    format!("{}: {msg}", m.id),
+                ));
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                record_failure(
+                    st,
+                    m,
+                    caller,
+                    profile,
+                    pool,
+                    raw_model,
+                    "connect_error",
+                    None,
+                    &msg,
+                    t0.elapsed().as_millis() as u64,
+                );
+                tracing::warn!(model = m.id, "connect error: {msg}");
+                st.health.record_failure(&m.id, true);
+                err.last_error = format!("{}: {msg}", m.id);
+                err.attempts += 1;
+            }
+        }
+    }
+    Err(err)
+}
+
+/// 402-style budget refusal with a machine-readable breakdown
+/// (routing.md §6 guard 1).
+fn budget_error(d: &budget::Denial, profile: &str, requested: &str, wire: Wire) -> Response {
+    let message = format!(
+        "on-demand budget exceeded: {layer} {window} cap ${cap:.2} (spent ${spent:.4}, this request est ${est:.4}); cheapest candidates were tried first",
+        layer = d.layer,
+        window = d.window,
+        cap = d.cap,
+        spent = d.spent,
+        est = d.est,
+    );
+    if wire == Wire::Anthropic {
+        let body = serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": message,
+                "budget": d.to_json(),
+                "profile": profile,
+                "requested": requested,
+            }
+        });
+        return (StatusCode::PAYMENT_REQUIRED, Json(body)).into_response();
+    }
+    let body = serde_json::json!({
+        "error": {
+            "type": "budget_exceeded",
+            "message": message,
+            "budget": d.to_json(),
+            "profile": profile,
+            "requested": requested,
+        }
+    });
+    (StatusCode::PAYMENT_REQUIRED, Json(body)).into_response()
+}
+
+fn retryable(code: u16) -> bool {
+    matches!(code, 402 | 408 | 429) || code >= 500
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &s[..end])
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_failure(
+    st: &AppState,
+    m: &Model,
+    caller: &CallerIdentity,
+    profile: &str,
+    pool: &str,
+    requested: &str,
+    status: &str,
+    http_status: Option<u16>,
+    _msg: &str,
+    latency_ms: u64,
+) {
+    let rec = UsageRecord {
+        ts_unix: unix_now(),
+        pool: pool.into(),
+        profile: profile.into(),
+        caller: caller.name.clone(),
+        project: caller.project.clone(),
+        grade_requested: requested.into(),
+        grade_served: st.reg().ladder.token(m.grade_rank).into(),
+        model: m.id.clone(),
+        status: status.into(),
+        http_status,
+        tokens_in: None,
+        tokens_out: None,
+        cost_usd: 0.0,
+        latency_ms,
+        ttfb_ms: None,
+        degraded: false,
+    };
+    st.usage.record(rec.clone());
+    st.metrics.record(&rec);
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn relay_success(
+    st: &AppState,
+    m: &Model,
+    caller: &CallerIdentity,
+    profile: &str,
+    pool: &str,
+    requested: &str,
+    degraded: bool,
+    is_stream: bool,
+    resp: reqwest::Response,
+    t0: Instant,
+    est: &quota::RequestEstimate,
+    cross_from: Option<&str>,
+    wire: Wire,
+) -> Response {
+    let reg = st.reg();
+    let served = reg.ladder.token(m.grade_rank);
+    let default_ct = if is_stream {
+        "text/event-stream"
+    } else {
+        "application/json"
+    };
+    let ct = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or(default_ct)
+        .to_string();
+
+    let mut builder = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, ct)
+        .header(hdr::UPSTREAM, m.id.as_str())
+        .header(hdr::POOL, pool)
+        .header(hdr::GRADE, served)
+        .header(hdr::PROFILE, profile);
+    if let Some(from) = cross_from {
+        builder = builder.header(hdr::CROSS_POOL, from);
+    }
+    if !caller.is_anonymous() {
+        builder = builder.header(hdr::CALLER, caller.name.as_str());
+        if let Some(p) = &caller.project {
+            builder = builder.header(hdr::PROJECT, p.as_str());
+        }
+    }
+    if degraded {
+        builder = builder.header(hdr::DEGRADED, served);
+    }
+
+    // E8: warm-cache stickiness — local-pool successes pin the caller's
+    // next same-grade request to this model so its KV cache stays hot.
+    if pool == "local" {
+        st.sticky.record(&caller.name, m.grade_rank, &m.id);
+    }
+
+    let rec_meta = |tokens_in, tokens_out, ttfb_ms, latency_ms| UsageRecord {
+        ts_unix: unix_now(),
+        pool: pool.into(),
+        profile: profile.into(),
+        caller: caller.name.clone(),
+        project: caller.project.clone(),
+        grade_requested: requested.into(),
+        grade_served: served.into(),
+        model: m.id.clone(),
+        status: "ok".into(),
+        http_status: Some(200),
+        tokens_in,
+        tokens_out,
+        cost_usd: UsageRecord::cost_for(tokens_in, tokens_out, m.cost_in, m.cost_out),
+        latency_ms,
+        ttfb_ms,
+        degraded,
+    };
+
+    if is_stream {
+        // E4 spend headers: estimate now — actual usage only arrives at
+        // the end of the stream (recorded in the usage log / metrics).
+        if pool == "ondemand" {
+            builder = builder.header(hdr::COST, format!("{:.6}", quota::est_cost(m, est)));
+            if let Some(rem) = budget::remaining_today(&st.usage, &st.cfg, profile, caller) {
+                builder = builder.header(hdr::BUDGET_REMAINING, format!("{:.6}", rem));
+            }
+        }
+        let tap = TapStream::new(
+            resp.bytes_stream(),
+            TapMeta {
+                pool: pool.into(),
+                profile: profile.into(),
+                requested: requested.into(),
+                served: served.into(),
+                caller: caller.name.clone(),
+                project: caller.project.clone(),
+                model: m.id.clone(),
+                cost_in: m.cost_in,
+                cost_out: m.cost_out,
+                degraded,
+            },
+            st.usage.clone(),
+            st.metrics.clone(),
+            st.health.clone(),
+            t0,
+        );
+        if wire == Wire::Anthropic {
+            // re-emit as anthropic SSE; insert() replaces the upstream
+            // content-type (which may carry openai-specific parameters)
+            let mut resp = builder
+                .body(Body::from_stream(AnthropicSse::new(tap)))
+                .unwrap();
+            resp.headers_mut().insert(
+                header::CONTENT_TYPE,
+                header::HeaderValue::from_static("text/event-stream"),
+            );
+            return resp;
+        }
+        builder.body(Body::from_stream(tap)).unwrap()
+    } else {
+        let bytes = resp.bytes().await.unwrap_or_default();
+        let (tin, tout) = extract_usage(&bytes);
+        let rec = rec_meta(tin, tout, None, t0.elapsed().as_millis() as u64);
+        if pool == "ondemand" {
+            builder = builder.header(hdr::COST, format!("{:.6}", rec.cost_usd));
+            if let Some(rem) = budget::remaining_today(&st.usage, &st.cfg, profile, caller) {
+                builder = builder.header(hdr::BUDGET_REMAINING, format!("{:.6}", rem));
+            }
+        }
+        st.usage.record(rec.clone());
+        st.metrics.record(&rec);
+        if wire == Wire::Anthropic {
+            let translated = serde_json::from_slice::<serde_json::Value>(&bytes)
+                .map(|v| crate::translate::openai_to_anthropic(&v))
+                .map(|v| v.to_string().into_bytes())
+                .unwrap_or_else(|_| bytes.to_vec());
+            let mut resp = builder.body(Body::from(translated)).unwrap();
+            resp.headers_mut().insert(
+                header::CONTENT_TYPE,
+                header::HeaderValue::from_static("application/json"),
+            );
+            return resp;
+        }
+        builder.body(Body::from(bytes)).unwrap()
+    }
+}
+
+/// Extract `usage` from a non-streaming chat completion body.
+fn extract_usage(bytes: &[u8]) -> (Option<u64>, Option<u64>) {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|v| {
+            let u = v.get("usage")?;
+            Some((
+                u.get("prompt_tokens").and_then(|x| x.as_u64()),
+                u.get("completion_tokens").and_then(|x| x.as_u64()),
+            ))
+        })
+        .unwrap_or((None, None))
+}
+
+async fn list_models(st: AppState, profile: &str, pool: &str) -> Response {
+    let reg = st.reg();
+    if profile != "default" && !reg.profiles.contains_key(profile) {
+        return api_error(404, "unknown_profile", profile.to_string());
+    }
+    if !crate::config::POOLS.contains(&pool) {
+        return api_error(404, "unknown_pool", pool.to_string());
+    }
+    let data: Vec<serde_json::Value> = (0..reg.ladder.grades.len())
+        .filter(|&rank| reg.has_exact(profile, pool, rank))
+        .map(|rank| {
+            serde_json::json!({
+                "id": reg.ladder.token(rank),
+                "object": "model",
+                "owned_by": "arouter",
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "object": "list", "data": data })).into_response()
+}
+
+/// Client-facing wire: openai chat-completions or anthropic messages.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Wire {
+    OpenAi,
+    Anthropic,
+}
+
+/// api_error that speaks the client's dialect.
+fn wire_error(wire: Wire, status: u16, code: &str, message: String) -> Response {
+    match wire {
+        Wire::OpenAi => api_error(status, code, message),
+        Wire::Anthropic => (
+            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST),
+            [(header::CONTENT_TYPE, "application/json")],
+            crate::translate::anthropic_error(status, code, &message).to_string(),
+        )
+            .into_response(),
+    }
+}
+
+fn api_error(status: u16, code: &str, message: String) -> Response {
+    api_error_with(status, code, message, &[])
+}
+
+fn api_error_with(
+    status: u16,
+    code: &str,
+    message: String,
+    extra: &[(header::HeaderName, String)],
+) -> Response {
+    let body = serde_json::json!({ "error": { "message": message, "type": code } });
+    let mut resp = (
+        StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+        Json(body),
+    )
+        .into_response();
+    for (name, value) in extra {
+        if let Ok(v) = header::HeaderValue::from_str(value) {
+            resp.headers_mut().insert(name, v);
+        }
+    }
+    resp
+}
+
+// ─────────────────────────── SSE usage tap ───────────────────────────
+
+pub struct TapMeta {
+    pub pool: String,
+    pub profile: String,
+    pub requested: String,
+    pub served: String,
+    pub caller: String,
+    pub project: Option<String>,
+    pub model: String,
+    pub cost_in: f64,
+    pub cost_out: f64,
+    pub degraded: bool,
+}
+
+/// Forwards upstream bytes untouched while scanning SSE lines for a final
+/// `usage` object; records one UsageRecord (usage log + metrics) when the
+/// stream ends.
+pub struct TapStream {
+    inner: Pin<Box<dyn Stream<Item = reqwest::Result<Bytes>> + Send>>,
+    scan: UsageScan,
+    meta: TapMeta,
+    usage: Arc<UsageLog>,
+    metrics: Arc<Metrics>,
+    health: Arc<Health>,
+    t0: Instant,
+    first_byte: Option<Instant>,
+    recorded: bool,
+}
+
+impl TapStream {
+    pub fn new(
+        inner: impl Stream<Item = reqwest::Result<Bytes>> + Send + 'static,
+        meta: TapMeta,
+        usage: Arc<UsageLog>,
+        metrics: Arc<Metrics>,
+        health: Arc<Health>,
+        t0: Instant,
+    ) -> Self {
+        Self {
+            inner: Box::pin(inner),
+            scan: UsageScan::default(),
+            meta,
+            usage,
+            metrics,
+            health,
+            t0,
+            first_byte: None,
+            recorded: false,
+        }
+    }
+
+    fn finish(&mut self, status: &str) {
+        if self.recorded {
+            return;
+        }
+        self.recorded = true;
+        // a stream that completed (even if the client hung up) proves the
+        // upstream was serving — only a broken stream counts against health
+        if status == "ok" || status == "aborted" {
+            self.health.record_success(&self.meta.model);
+        }
+        let (tin, tout) = self.scan.usage();
+        let rec = UsageRecord {
+            ts_unix: unix_now(),
+            pool: self.meta.pool.clone(),
+            profile: self.meta.profile.clone(),
+            caller: self.meta.caller.clone(),
+            project: self.meta.project.clone(),
+            grade_requested: self.meta.requested.clone(),
+            grade_served: self.meta.served.clone(),
+            model: self.meta.model.clone(),
+            status: status.into(),
+            http_status: Some(200),
+            tokens_in: tin,
+            tokens_out: tout,
+            cost_usd: UsageRecord::cost_for(tin, tout, self.meta.cost_in, self.meta.cost_out),
+            latency_ms: self.t0.elapsed().as_millis() as u64,
+            ttfb_ms: self
+                .first_byte
+                .map(|t| t.duration_since(self.t0).as_millis() as u64),
+            degraded: self.meta.degraded,
+        };
+        self.usage.record(rec.clone());
+        self.metrics.record(&rec);
+    }
+}
+
+impl Stream for TapStream {
+    type Item = std::io::Result<Bytes>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        match self.inner.as_mut().poll_next(cx) {
+            std::task::Poll::Ready(Some(Ok(bytes))) => {
+                if self.first_byte.is_none() {
+                    self.first_byte = Some(Instant::now());
+                }
+                self.scan.feed(&bytes);
+                std::task::Poll::Ready(Some(Ok(bytes)))
+            }
+            std::task::Poll::Ready(Some(Err(e))) => {
+                self.finish("aborted");
+                std::task::Poll::Ready(Some(Err(std::io::Error::other(e.to_string()))))
+            }
+            std::task::Poll::Ready(None) => {
+                self.finish("ok");
+                std::task::Poll::Ready(None)
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+/// Wraps a stream of upstream openai-SSE bytes and re-emits anthropic
+/// SSE frames (E7). Sits *outside* the TapStream so usage accounting,
+/// health and metrics still see the openai wire they already parse.
+struct AnthropicSse<S> {
+    inner: S,
+    tr: crate::translate::SseTranslator,
+    tail: Option<Bytes>,
+}
+
+impl<S> AnthropicSse<S> {
+    fn new(inner: S) -> Self {
+        Self {
+            inner,
+            tr: crate::translate::SseTranslator::new(),
+            tail: None,
+        }
+    }
+}
+
+impl<S> Stream for AnthropicSse<S>
+where
+    S: Stream<Item = std::io::Result<Bytes>> + Unpin,
+{
+    type Item = std::io::Result<Bytes>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        if let Some(t) = this.tail.take() {
+            return std::task::Poll::Ready(Some(Ok(t)));
+        }
+        match Pin::new(&mut this.inner).poll_next(cx) {
+            std::task::Poll::Ready(Some(Ok(bytes))) => {
+                let frames = this.tr.push_bytes(&bytes);
+                if frames.is_empty() {
+                    // no complete anthropic event yet: poll again
+                    cx.waker().wake_by_ref();
+                    return std::task::Poll::Pending;
+                }
+                std::task::Poll::Ready(Some(Ok(Bytes::from(frames.concat()))))
+            }
+            std::task::Poll::Ready(Some(Err(e))) => std::task::Poll::Ready(Some(Err(e))),
+            std::task::Poll::Ready(None) => {
+                let frames = this.tr.finish();
+                if frames.is_empty() {
+                    std::task::Poll::Ready(None)
+                } else {
+                    this.tail = None;
+                    std::task::Poll::Ready(Some(Ok(Bytes::from(frames.concat()))))
+                }
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+/// Incremental SSE scanner: keeps the last `usage` seen in `data:` payloads.
+#[derive(Default)]
+pub struct UsageScan {
+    buf: Vec<u8>,
+    tokens_in: Option<u64>,
+    tokens_out: Option<u64>,
+}
+
+impl UsageScan {
+    pub fn feed(&mut self, bytes: &[u8]) {
+        self.buf.extend_from_slice(bytes);
+        while let Some(nl) = self.buf.iter().position(|&b| b == b'\n') {
+            let mut line: Vec<u8> = self.buf.drain(..=nl).collect();
+            line.pop(); // strip \n
+            self.handle_line(&line);
+        }
+        // Cap: never let a malformed stream grow the buffer unbounded.
+        if self.buf.len() > 1_048_576 {
+            self.buf.clear();
+        }
+    }
+
+    fn handle_line(&mut self, line: &[u8]) {
+        let line = match line.strip_suffix(b"\r") {
+            Some(l) => l,
+            None => line,
+        };
+        let Some(payload) = line.strip_prefix(b"data:") else {
+            return;
+        };
+        let payload = payload.strip_prefix(b" ").unwrap_or(payload);
+        if payload == b"[DONE]" {
+            return;
+        }
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) {
+            if let Some(u) = v.get("usage") {
+                if let Some(t) = u.get("prompt_tokens").and_then(|x| x.as_u64()) {
+                    self.tokens_in = Some(t);
+                }
+                if let Some(t) = u.get("completion_tokens").and_then(|x| x.as_u64()) {
+                    self.tokens_out = Some(t);
+                }
+            }
+        }
+    }
+
+    pub fn usage(&self) -> (Option<u64>, Option<u64>) {
+        (self.tokens_in, self.tokens_out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn feed_chunks(scan: &mut UsageScan, chunks: &[&str]) -> (Option<u64>, Option<u64>) {
+        for c in chunks {
+            scan.feed(c.as_bytes());
+        }
+        scan.usage()
+    }
+
+    #[test]
+    fn scan_extracts_usage_from_final_chunk() {
+        let mut s = UsageScan::default();
+        let (tin, tout) = feed_chunks(
+            &mut s,
+            &[
+                "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n",
+                "data: [DONE]\n\n",
+            ],
+        );
+        assert_eq!((tin, tout), (Some(7), Some(2)));
+    }
+
+    #[test]
+    fn scan_handles_split_boundaries() {
+        let mut s = UsageScan::default();
+        // one logical line split across three network chunks
+        let (tin, tout) = feed_chunks(
+            &mut s,
+            &[
+                "data: {\"usage\":{\"prompt",
+                "_tokens\":42,\"completion",
+                "_tokens\":9}}\n",
+            ],
+        );
+        assert_eq!((tin, tout), (Some(42), Some(9)));
+    }
+
+    #[test]
+    fn scan_ignores_non_data_and_done() {
+        let mut s = UsageScan::default();
+        let (tin, tout) = feed_chunks(
+            &mut s,
+            &[
+                ": keep-alive\n",
+                "event: message\n",
+                "data: [DONE]\n",
+                "data: {\"choices\":[]}\n",
+            ],
+        );
+        assert_eq!((tin, tout), (None, None));
+    }
+
+    #[test]
+    fn scan_no_usage_in_stream() {
+        let mut s = UsageScan::default();
+        let (tin, tout) = feed_chunks(
+            &mut s,
+            &["data: {\"choices\":[{\"delta\":{}}]}\ndata: [DONE]\n"],
+        );
+        assert_eq!((tin, tout), (None, None));
+    }
+
+    #[test]
+    fn extract_usage_non_stream() {
+        let body = r#"{"id":"1","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":4}}"#;
+        assert_eq!(extract_usage(body.as_bytes()), (Some(10), Some(4)));
+        assert_eq!(extract_usage(b"{}"), (None, None));
+        assert_eq!(extract_usage(b"not json"), (None, None));
+    }
+
+    #[test]
+    fn retryable_codes() {
+        assert!(retryable(429));
+        assert!(retryable(500));
+        assert!(retryable(503));
+        assert!(retryable(402)); // payment required → try next candidate
+        assert!(retryable(408));
+        assert!(!retryable(400));
+        assert!(!retryable(401));
+        assert!(!retryable(404));
+    }
+
+    #[test]
+    fn truncate_respects_char_boundaries() {
+        assert_eq!(truncate("hello", 10), "hello");
+        assert_eq!(truncate("hello world", 5), "hello…");
+        // multibyte boundary safety
+        let t = "açãoaçãoação";
+        let out = truncate(t, 5);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn bearer_extraction() {
+        let mut h = HeaderMap::new();
+        assert!(bearer_of(&h).is_none());
+        h.insert(header::AUTHORIZATION, "Bearer tok-1".parse().unwrap());
+        assert_eq!(bearer_of(&h).as_deref(), Some("tok-1"));
+        h.insert(header::AUTHORIZATION, "bearer tok-2".parse().unwrap());
+        assert_eq!(bearer_of(&h).as_deref(), Some("tok-2"));
+        h.insert(header::AUTHORIZATION, "Basic abc".parse().unwrap());
+        assert!(bearer_of(&h).is_none());
+        h.insert(req_hdr::API_KEY, "tok-3".parse().unwrap());
+        assert_eq!(bearer_of(&h).as_deref(), Some("tok-3"));
+    }
+}

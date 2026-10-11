@@ -1,0 +1,162 @@
+# arouter example configuration.
+# Copy to ~/.config/arouter/config.toml and edit. Keys are resolved from
+# real environment first, then ~/.config/arouter/.env, then ~/.config/aitop/.env.
+
+[server]
+# "0.0.0.0:3929" makes arouter reachable from the LAN. Transport is
+# plain HTTP: trusted networks only — set auth.require + [[callers]]
+# keys before exposing further.
+bind = "127.0.0.1:3929"
+# state_dir = "~/.local/state/arouter"   # usage.jsonl lives here
+
+# ── callers: who is talking to arouter (multi-user metrics) ─────────────
+# Each caller gets its own API key; point pi entries (or any OpenAI client)
+# at arouter with that key to attribute usage per user/project.
+#   - open mode (require=false, default): missing/unknown key → "anonymous";
+#     X-Arouter-User / X-Arouter-Project request headers also work.
+#   - require=true: unknown or missing key → 401; header identification is
+#     ignored (spoofable without auth).
+[[callers]]
+name    = "alice"
+project = "arouter"
+key     = "env:AROUTER_KEY_ALICE"
+# Personal daily on-demand cap (E4): stacks below pool/profile caps.
+# budget_usd_day = 2.0
+
+[[callers]]
+name = "ci"
+key  = "key:arouter-ci-local-token"
+
+[auth]
+require = false
+
+[grades]
+ladder = ["A+", "A", "B", "C"]
+
+[routing]
+# Upstream model discovery poll (`/v1/models`, ollama /api/tags): new
+# models appear automatically, graded by catalog/heuristic. 0 = off;
+# SIGHUP and config edits always trigger an immediate reload.
+discovery_interval_secs = 300
+# Warm-cache stickiness for the local pool: consecutive requests from one
+# caller for one grade stick to the model that just served them, keeping
+# the engine's prompt/KV cache hot. 0 disables.
+sticky_local_secs = 600
+
+[routing.fallback]
+# Which grades may serve each requested grade. Omitted grades default to
+# [self, one lower]. Requests can cap themselves with ranges: model "A+..A".
+# allow = { "A+" = ["A+", "A"], "A" = ["A", "B"] }
+cross_pool = []   # never silently fall into the on-demand pool
+
+[quota_watcher]
+# E3: run `aitop --json` on an interval to learn quota windows, resets and
+# pace per provider. Feeds availability scoring (scarce/reset-soon/pace
+# penalties, exhausted → skip + reset-aware Retry-After) and /status.json.
+# 0 disables (routing then trusts health data only). Missing aitop warns
+# once and degrades — never fatal.
+interval_secs = 60
+# command = "aitop --json"        # any JSON-emitting command works
+# Registry provider prefix → aitop panel name; unmapped providers use
+# exact then dot-stripped matching (zai → z.ai works out of the box).
+provider_map = { "or" = "openrouter" }
+
+[pool.ondemand]
+preference = "cheapest"          # cheapest | fastest | manual
+# Spend guards (routing.md §6; 0 = off). Daily/monthly are calendar-day
+# UTC / rolling 30d; pace is a rolling hour. Stacks with per-profile and
+# per-caller caps — the tightest wins.
+# budget = { daily_usd = 5.0, monthly_usd = 50.0, pace_hourly_usd = 1.0, per_request_usd = 0.50 }
+
+[profiles.vip]
+description = "premium models for hard tasks"
+# models = { exclude = ["ollama/*"] }
+
+# ── models ────────────────────────────────────────────────────────────────
+# id: provider/model (model part defaults to the upstream name)
+# pool: quota | local | ondemand — hard boundary, never crossed silently
+# auth: env:NAME | key:LITERAL | none
+#
+# Cross-pool fallback is explicit opt-in (routing.md §2). When the quota
+# pool is exhausted, `cross_pool = ["ondemand"]` would pay instead of
+# failing — every such response carries X-Arouter-Cross-Pool and still
+# passes the on-demand budget guards:
+# [routing.fallback]
+# cross_pool = ["ondemand"]
+
+[[models]]
+id        = "zai/glm-5.3"
+grade     = "A+"
+pool      = ["quota"]
+context   = 131072
+base_url  = "https://api.z.ai/api/coding/paas/v4"
+auth      = "env:ZAI_API_KEY"
+weight    = 1.5
+
+[[models]]
+id        = "zai/glm-5.2"
+grade     = "A"
+pool      = ["quota"]
+base_url  = "https://api.z.ai/api/coding/paas/v4"
+auth      = "env:ZAI_API_KEY"
+
+[[models]]
+id        = "zai/glm-5.3-flash"
+grade     = "B"
+pool      = ["quota"]
+base_url  = "https://api.z.ai/api/coding/paas/v4"
+auth      = "env:ZAI_API_KEY"
+weight    = 0.5
+
+[[models]]
+id        = "strata/qwen3.8-flash-next-coder-iq1_m"
+grade     = "B"
+pool      = ["local", "quota"]
+context   = 131072
+weight    = 2.0
+base_url  = "http://127.0.0.1:8081/v1"
+auth      = "none"
+
+[[models]]
+id        = "ollama/qwen3:14b"
+grade     = "B"
+pool      = ["local"]
+weight    = 0.5
+base_url  = "http://127.0.0.1:11434/v1"
+auth      = "none"
+
+# On-demand: pay-per-token — always priced so budgets & spend headers work.
+[[models]]
+id       = "or/anthropic/claude-opus-4.6"
+grade    = "A+"
+pool     = ["ondemand"]
+base_url = "https://openrouter.ai/api/v1"
+auth     = "env:OPENROUTER_API_KEY"
+cost_in  = 5.0
+cost_out = 25.0
+profiles = ["vip"]          # exclusive to the vip profile
+
+[[models]]
+id       = "or/openai/gpt-5.2"
+grade    = "A"
+pool     = ["ondemand"]
+base_url = "https://openrouter.ai/api/v1"
+auth     = "env:OPENROUTER_API_KEY"
+cost_in  = 1.25
+cost_out = 10.0
+
+# ─────────────────────────── local engine awareness (E8) ───────────────────────────
+# Poll local inference engines so routing prefers models that are already
+# resident (no cold load) and avoids engines that are mid-generation.
+# Routing stays grade-first: residency only reorders within a grade.
+
+[local_engines]
+poll_secs = 30               # 0 = off (routing then ignores residency)
+
+[[local_engines.engines]]
+url  = "http://127.0.0.1:11434"   # engine root, no /v1
+kind = "auto"                     # auto | ollama | llamacpp
+
+# [[local_engines.engines]]
+# url  = "http://127.0.0.1:8081"   # strata / llama.cpp server
+# kind = "llamacpp"

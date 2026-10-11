@@ -1,0 +1,32 @@
+[package]
+name = "arouter"
+version = "0.1.0"
+edition = "2021"
+description = "Quota-aware LLM agent router — pick a grade (A+/A/B), arouter picks the model"
+license = "MIT"
+repository = "https://github.com/rafaelzimmermann/arouter"
+authors = ["Rafael Zimmermann"]
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+crossterm = { version = "0.28", features = ["event-stream"] }
+ratatui = "0.29"
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "net", "process"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+
+[profile.release]
+lto = "thin"
+strip = true

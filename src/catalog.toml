@@ -1,0 +1,80 @@
+# Built-in model catalog for auto-grading (docs/grading.md).
+# Entries are globs matched against the model id and its last path
+# segment, so `zai/glm-5.3` and `or/z-ai/glm-5.3` both match `glm-5.3`.
+# FIRST MATCHING ENTRY WINS — blocks are ordered most→least specific,
+# deliberately not by grade (a mini/flash variant of an A family is B).
+# Versioned per release; `arouter models grade --write` regenerates
+# grades.auto.toml below this precedence.
+
+catalog_version = 1
+
+# ── C · tiny sizes (most specific: explicit suffixes) ─────────────────
+[[entry]]
+grade = "C"
+match = [
+  "*:0.5b", "*:1b", "*:1.5b", "*:1.8b", "*:2b", "*:3b", "*:4b",
+  "*-small*", "*-tiny*", "*-nano-*",
+]
+
+# ── A+ · frontier ──────────────────────────────────────────────────────
+[[entry]]
+grade = "A+"
+match = [
+  "gpt-5.2*", "gpt-5.1-pro*", "gpt-5-pro*",
+  "*-opus-*", "claude-opus*", "opus-*",
+  "gemini-3-pro*", "gemini-3-ultra*", "gemini-3-flash-thinking*",
+  "grok-4*", "glm-5.3", "glm-6*",
+  "deepseek-v4*", "deepseek-r2*",
+  "o3-pro*", "o4-*",
+  "qwen3.8-max*", "qwen4-max*",
+]
+notes = "frontier capability"
+
+# ── B · fast / economical variants of any family ───────────────────────
+[[entry]]
+grade = "B"
+match = [
+  "gpt-5-mini*", "gpt-4.1-mini*", "o3-mini*", "o4-mini*",
+  "*-haiku*", "claude-haiku*", "haiku-*",
+  "*mini*", "*mini-*", "-mini*",
+  "*flash*", "*flash-*", "-flash*",
+  "*-turbo", "*-turbo-*",
+  "*nano*", "*lite*",
+  "*-coder*", "*-coder-*", "coder*",
+]
+notes = "economical variants (mini/flash/haiku/coder) regardless of family"
+
+# ── A · strong ─────────────────────────────────────────────────────────
+[[entry]]
+grade = "A"
+match = [
+  "devstral*",
+  "gpt-5*", "gpt-4.1*", "gpt-4o*",
+  "*-sonnet-*", "claude-sonnet*", "claude-4-*", "sonnet-*",
+  "gemini-2.5-pro*",
+  "glm-5.2", "glm-4.6*",
+  "qwen3-max*", "qwen3.5*",
+  "mistral-large*", "mistral-medium*",
+  "deepseek-v3*", "deepseek-r1*",
+  "kimi-k2*", "grok-3*", "grok-2*",
+  "llama-4-maverick*", "llama-4-scout*",
+]
+notes = "strong general capability"
+
+# ── B · small/mid open families (least specific) ───────────────────────
+[[entry]]
+grade = "B"
+match = [
+  "gemma*", "llama*", "qwen*",
+  "phi-*", "phi*", "mistral-small*", "mistral-*",
+  "gpt-oss-120b", "gpt-oss-*",
+]
+notes = "small/mid open families"
+
+# ── heuristic breakpoints (blended $/Mtok = (in + 3×out)/4) ────────────
+# Calibrated against the A/A+/B catalog families above; used to grade
+# unknown priced models by percentile band.
+[heuristic]
+a_plus_min = 4.0
+a_min = 1.0
+b_min = 0.15

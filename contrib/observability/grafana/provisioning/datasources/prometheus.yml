@@ -1,0 +1,11 @@
+# Grafana datasource for the live stack: the stack's own Prometheus,
+# fixed uid so the dashboard's ${DS_PROMETHEUS} variable resolves.
+apiVersion: 1
+datasources:
+  - name: arouter-prom
+    uid: arouter-prom
+    type: prometheus
+    access: proxy
+    url: http://host.docker.internal:9090
+    isDefault: true
+    editable: false

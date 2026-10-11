@@ -1,0 +1,96 @@
+# Black-box integration topology for arouter (tests/integration/).
+#   docker compose up -d --wait && tests/integration/run.sh
+# Host port map: arouter 3939 · stub-a..d admin 9101..9104 · aitop 9100
+name: arouter-it
+
+x-stub: &stub
+  build: ./stub
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:9000/v1/models', timeout=2)"]
+    interval: 2s
+    timeout: 3s
+    retries: 15
+
+services:
+  stub-a:
+    <<: *stub
+    environment: { MODEL: "alpha" }
+    ports: ["9101:9000"]
+  stub-b:
+    <<: *stub
+    environment: { MODEL: "beta" }
+    ports: ["9102:9000"]
+  stub-c:
+    <<: *stub
+    environment: { MODEL: "gamma" }
+    ports: ["9103:9000"]
+  stub-d:
+    <<: *stub
+    environment: { MODEL: "any" }
+    ports: ["9104:9000"]
+
+  aitop:
+    build: ./aitop
+    restart: unless-stopped
+    ports: ["9100:80"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:80/quotas.json', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  arouter:
+    # built by run.sh from the repo root: docker build -t arouter-it:local ..
+    image: arouter-it:local
+    restart: unless-stopped
+    command: ["serve", "--config", "/etc/arouter/arouter.toml"]
+    volumes:
+      - ./arouter.toml:/etc/arouter/arouter.toml:ro
+    ports: ["3939:3929"]
+    depends_on:
+      stub-a: { condition: service_healthy }
+      stub-b: { condition: service_healthy }
+      stub-c: { condition: service_healthy }
+      stub-d: { condition: service_healthy }
+      aitop: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3929/healthz"]
+      interval: 2s
+      timeout: 3s
+
+  prometheus:
+    # scrapes the arouter container (see prometheus.yml); host port for
+    # browsing + the run.sh observability checks
+    image: prom/prometheus:v3.6.0
+    restart: unless-stopped
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  grafana:
+    # anonymous Admin is rig-only convenience for the API smoke checks;
+    # the dashboard is auto-provisioned from contrib/grafana-dashboard.json
+    image: grafana/grafana:12.2.0
+    restart: unless-stopped
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../../contrib/grafana-dashboard.json:/var/lib/grafana/dashboards/arouter.json:ro
+    ports: ["3300:3000"]
+    depends_on:
+      prometheus: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

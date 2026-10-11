@@ -1,0 +1,10 @@
+# Prometheus scrape config for the E9 rig: the arouter container, 2s
+# interval so the matrix's runtime-flippable fixtures land fast.
+global:
+  scrape_interval: 2s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: arouter
+    static_configs:
+      - targets: ["arouter:3929"]

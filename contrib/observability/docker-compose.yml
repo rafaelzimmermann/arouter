@@ -1,0 +1,52 @@
+# arouter observability stack — Prometheus + Grafana against the LIVE
+# daemon (default 127.0.0.1:3929). Persistent counterpart to the E9 rig:
+#
+#   docker compose -p arouter-obs up -d --wait
+#   → Grafana    http://localhost:3300   (dashboard auto-provisioned)
+#   → Prometheus http://localhost:9090
+#   docker compose -p arouter-obs down
+#
+# If your daemon listens elsewhere, change the target in prometheus.yml.
+services:
+  prometheus:
+    image: prom/prometheus:v3.6.0
+    restart: unless-stopped
+    # host network: the daemon binds 127.0.0.1, unreachable from a bridge
+    # network — this way 127.0.0.1:3929 scrapes work without touching the
+    # daemon's bind. No ports mapping needed (it IS on the host).
+    network_mode: host
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  grafana:
+    image: grafana/grafana:12.2.0
+    restart: unless-stopped
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # → host-networked prometheus
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../grafana-dashboard.json:/var/lib/grafana/dashboards/arouter.json:ro
+      - grafana-data:/var/lib/grafana
+    ports: ["3300:3000"]
+    depends_on:
+      prometheus: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  prom-data:
+  grafana-data:
