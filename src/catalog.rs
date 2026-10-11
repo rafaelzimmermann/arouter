@@ -30,9 +30,9 @@ struct RawEntry {
 
 #[derive(Debug, Deserialize, Default)]
 struct RawHeuristic {
-    a_plus_min: Option<f64>,
-    a_min: Option<f64>,
-    b_min: Option<f64>,
+    a_plus_max: Option<f64>,
+    a_max: Option<f64>,
+    b_max: Option<f64>,
 }
 
 /// A graded catalog entry after parsing.
@@ -45,17 +45,17 @@ pub struct CatalogEntry {
 
 #[derive(Debug, Clone)]
 pub struct HeuristicBreakpoints {
-    pub a_plus_min: f64,
-    pub a_min: f64,
-    pub b_min: f64,
+    pub a_plus_max: f64,
+    pub a_max: f64,
+    pub b_max: f64,
 }
 
 impl Default for HeuristicBreakpoints {
     fn default() -> Self {
         Self {
-            a_plus_min: 4.0,
-            a_min: 1.0,
-            b_min: 0.15,
+            a_plus_max: 0.15,
+            a_max: 1.0,
+            b_max: 4.0,
         }
     }
 }
@@ -123,9 +123,9 @@ impl Catalog {
             version: raw.catalog_version,
             entries,
             heuristic: HeuristicBreakpoints {
-                a_plus_min: h.a_plus_min.unwrap_or(4.0),
-                a_min: h.a_min.unwrap_or(1.0),
-                b_min: h.b_min.unwrap_or(0.15),
+                a_plus_max: h.a_plus_max.unwrap_or(0.15),
+                a_max: h.a_max.unwrap_or(1.0),
+                b_max: h.b_max.unwrap_or(4.0),
             },
         })
     }
@@ -174,16 +174,25 @@ impl Catalog {
         let mut reasons: Vec<String> = Vec::new();
         let mut rank: usize;
 
-        // 1. base from blended price percentile bands
+        // 1. base grade from blended price — cheaper is favored: a priced
+        // model earns its band when blended ≤ the band's ceiling. Free
+        // (price 0) and unpriced models never guess upward (C + unknown).
         let blended = input.price.map(|(cin, cout)| (cin + 3.0 * cout) / 4.0);
         match blended {
+            Some(b) if b <= 0.0 => {
+                return AutoGrade {
+                    grade_rank: ladder.rank("C").unwrap_or_else(|| ladder.worst()),
+                    provenance: Provenance::Unknown,
+                    rationale: "free (no price signal)".to_string(),
+                };
+            }
             Some(b) => {
                 let hp = &self.heuristic;
-                rank = if b >= hp.a_plus_min {
+                rank = if b <= hp.a_plus_max {
                     ladder.rank("A+").unwrap_or(0)
-                } else if b >= hp.a_min {
+                } else if b <= hp.a_max {
                     ladder.rank("A").unwrap_or(1)
-                } else if b >= hp.b_min {
+                } else if b <= hp.b_max {
                     ladder.rank("B").unwrap_or(2)
                 } else {
                     ladder.rank("C").unwrap_or_else(|| ladder.worst())
@@ -215,7 +224,9 @@ impl Catalog {
         };
 
         // 2. keyword caps / floors
-        let fast_kw = ["flash", "mini", "nano", "haiku", "lite", "small", "fast"];
+        let fast_kw = [
+            "flash", "mini", "nano", "haiku", "lite", "small", "fast", "micro", "xs",
+        ];
         let big_kw = ["opus", "ultra", "max", "frontier"];
         if fast_kw.iter().any(|k| name.contains(k)) {
             cap(&mut rank, b_rank, "keyword cap B", &mut reasons);
@@ -313,7 +324,7 @@ mod tests {
         assert!(!c.entries.is_empty());
         // heuristic breakpoints are present and monotonic
         let h = &c.heuristic;
-        assert!(h.b_min < h.a_min && h.a_min < h.a_plus_min);
+        assert!(h.a_plus_max < h.a_max && h.a_max < h.b_max);
     }
 
     #[test]
@@ -341,53 +352,88 @@ mod tests {
             context: None,
             local: false,
         };
-        let aplus = c.heuristic_grade(&l, &h(4.0, 8.0)); // blended 7.0
-        assert_eq!(aplus.grade_rank, l.rank("A+").unwrap());
-        assert!(aplus.rationale.contains("price $7.00"));
-        let a = c.heuristic_grade(&l, &h(1.0, 1.0)); // blended 1.0
-        assert_eq!(a.grade_rank, l.rank("A").unwrap());
-        let b = c.heuristic_grade(&l, &h(0.1, 0.1)); // blended 0.1 < b_min → C
-        assert_eq!(b.grade_rank, l.rank("C").unwrap());
+        // cheaper is favored: low blended → high grade
+        let cheap = c.heuristic_grade(&l, &h(0.1, 0.1)); // blended 0.1 ≤ a_plus_max
+        assert_eq!(cheap.grade_rank, l.rank("A+").unwrap());
+        assert!(cheap.rationale.contains("price $0.10"));
+        let mid = c.heuristic_grade(&l, &h(1.0, 1.0)); // blended 1.0 ≤ a_max
+        assert_eq!(mid.grade_rank, l.rank("A").unwrap());
+        let premium = c.heuristic_grade(&l, &h(2.0, 2.0)); // blended 2.0 ≤ b_max
+        assert_eq!(premium.grade_rank, l.rank("B").unwrap());
+        let expensive = c.heuristic_grade(&l, &h(6.0, 6.0)); // blended 6.0 > b_max
+        assert_eq!(expensive.grade_rank, l.rank("C").unwrap());
+    }
+
+    #[test]
+    fn heuristic_free_and_unpriced_never_guessed_upward() {
+        let l = Ladder::default();
+        let c = catalog();
+        // free (price 0) is not "cheap" — never guessed upward, even with
+        // a frontier keyword that would otherwise floor it at A
+        let free = c.heuristic_grade(
+            &l,
+            &HeuristicInput {
+                id: "x/mystery-ultra",
+                price: Some((0.0, 0.0)),
+                context: None,
+                local: false,
+            },
+        );
+        assert_eq!(free.grade_rank, l.rank("C").unwrap());
+        assert_eq!(free.provenance, Provenance::Unknown);
     }
 
     #[test]
     fn heuristic_keyword_and_size_rules() {
         let l = Ladder::default();
         let c = catalog();
-        // expensive but "flash" → capped at B
+        // cheap but "flash" → capped at B
         let x = c.heuristic_grade(
             &l,
             &HeuristicInput {
                 id: "x/mystery-flash-pro",
-                price: Some((10.0, 10.0)),
+                price: Some((0.1, 0.1)),
                 context: None,
                 local: false,
             },
         );
         assert_eq!(x.grade_rank, l.rank("B").unwrap());
         assert!(x.rationale.contains("keyword cap B"));
-        // small size caps even without keywords
+        // "micro" is also a tiny-model signal → capped at B even if cheap
         let x = c.heuristic_grade(
             &l,
             &HeuristicInput {
-                id: "x/mystery:8b",
-                price: Some((10.0, 10.0)),
+                id: "x/nova-micro",
+                price: Some((0.05, 0.05)),
                 context: None,
                 local: false,
             },
         );
         assert_eq!(x.grade_rank, l.rank("B").unwrap());
-        // opus floor
+        assert!(x.rationale.contains("keyword cap B"));
+        // small size caps even for cheap models
         let x = c.heuristic_grade(
             &l,
             &HeuristicInput {
-                id: "x/bargain-opus",
-                price: Some((0.0, 0.0)),
+                id: "x/mystery:8b",
+                price: Some((0.1, 0.1)),
                 context: None,
                 local: false,
             },
         );
-        assert!(x.grade_rank <= l.rank("A").unwrap());
+        assert_eq!(x.grade_rank, l.rank("B").unwrap());
+        assert!(x.rationale.contains("size 8.0b cap B"));
+        // frontier keyword floors even an expensive unknown to A
+        let x = c.heuristic_grade(
+            &l,
+            &HeuristicInput {
+                id: "x/bargain-opus",
+                price: Some((8.0, 8.0)),
+                context: None,
+                local: false,
+            },
+        );
+        assert_eq!(x.grade_rank, l.rank("A").unwrap());
         assert!(x.rationale.contains("keyword floor A"));
     }
 
