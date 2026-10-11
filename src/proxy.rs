@@ -112,6 +112,8 @@ pub struct AppState {
     pub started: Instant,
     /// E10a web shell: sessions + claim bootstrap.
     pub web: Arc<crate::web::Web>,
+    /// E10b API tokens (`ark_…`): hashed store, scopes narrow routing.
+    pub tokens: Arc<crate::tokens::TokenStore>,
 }
 
 impl AppState {
@@ -163,6 +165,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/session", get(crate::web::api_session))
         .route("/api/overview", get(crate::web::api_overview))
         .route("/api/logout", post(crate::web::api_logout))
+        .route(
+            "/api/tokens",
+            get(crate::web::api_tokens).post(crate::web::api_tokens_create),
+        )
+        .route("/api/tokens/revoke", post(crate::web::api_tokens_revoke))
         .with_state(state)
 }
 
@@ -278,9 +285,15 @@ fn obs_auth(st: &AppState, headers: &HeaderMap) -> Option<Response> {
     if !rt.cfg.auth.require {
         return None;
     }
-    match resolve_caller(&rt.callers, headers) {
+    match resolve_caller(&rt.callers, &st.tokens, headers) {
         Ok(_) => None,
-        Err(msg) => Some(api_error(401, "unauthorized", msg)),
+        Err(CallerErr::Unauthorized(msg)) => Some(api_error(401, "unauthorized", msg)),
+        Err(CallerErr::BudgetExhausted { retry_after_secs }) => Some(api_error_with(
+            429,
+            "arouter_token_budget",
+            "token daily budget exhausted".into(),
+            &[(header::RETRY_AFTER, retry_after_secs.to_string())],
+        )),
     }
 }
 
@@ -533,17 +546,55 @@ fn hdr_str<'a>(headers: &'a HeaderMap, name: &HeaderName) -> Option<&'a str> {
         .map(str::trim)
 }
 
+/// Why a request's caller resolution failed.
+#[derive(Debug)]
+pub enum CallerErr {
+    /// 401 — missing/unknown credentials.
+    Unauthorized(String),
+    /// 429 — the token's daily budget is spent; retry at UTC midnight.
+    BudgetExhausted { retry_after_secs: u64 },
+}
+
 /// Resolve the caller identity for a request (see docs/architecture.md
-/// §Callers): bearer key → `[[callers]]` entry; open mode falls back to
+/// §Callers): `ark_…` tokens (E10b, dynamic store) take precedence over
+/// static `[[callers]]` keys; open mode falls back to
 /// `X-Arouter-User`/`X-Arouter-Project` headers, else anonymous.
-/// Err = rejection message (401).
-fn resolve_caller(callers: &CallerMap, headers: &HeaderMap) -> Result<CallerIdentity, String> {
+/// Token requests also yield the scopes that narrow candidate
+/// selection (intersected BEFORE the grade sort, like pools).
+fn resolve_caller(
+    callers: &CallerMap,
+    tokens: &crate::tokens::TokenStore,
+    headers: &HeaderMap,
+) -> Result<(CallerIdentity, Option<crate::tokens::Scopes>), CallerErr> {
     let bearer = bearer_of(headers);
-    callers.resolve(
-        bearer.as_deref(),
-        hdr_str(headers, &req_hdr::USER),
-        hdr_str(headers, &req_hdr::PROJECT),
-    )
+    if let Some(tok) = bearer
+        .as_deref()
+        .filter(|t| t.starts_with(crate::tokens::PREFIX))
+    {
+        return match tokens.authenticate(tok) {
+            Ok(auth) => Ok((
+                CallerIdentity {
+                    name: format!("{}{}", crate::tokens::CALLER_PREFIX, auth.name),
+                    project: None,
+                },
+                Some(auth.scopes),
+            )),
+            Err(crate::tokens::AuthError::BudgetExhausted) => Err(CallerErr::BudgetExhausted {
+                retry_after_secs: crate::tokens::secs_to_utc_midnight(crate::tokens::unix_now()),
+            }),
+            Err(crate::tokens::AuthError::Unknown) => Err(CallerErr::Unauthorized(
+                "unknown or revoked api token".into(),
+            )),
+        };
+    }
+    callers
+        .resolve(
+            bearer.as_deref(),
+            hdr_str(headers, &req_hdr::USER),
+            hdr_str(headers, &req_hdr::PROJECT),
+        )
+        .map(|c| (c, None))
+        .map_err(CallerErr::Unauthorized)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -560,9 +611,21 @@ async fn handle_chat(
     // review F6: one snapshot for the whole request — reloads swap the
     // Arc under us, this request still finishes on the config it saw
     let rt = st.runtime();
-    let caller = match resolve_caller(&rt.callers, headers) {
+    let (caller, tok_scopes) = match resolve_caller(&rt.callers, &st.tokens, headers) {
         Ok(c) => c,
-        Err(msg) => return wire_error(wire, 401, "unauthorized", msg),
+        Err(CallerErr::Unauthorized(msg)) => return wire_error(wire, 401, "unauthorized", msg),
+        Err(CallerErr::BudgetExhausted { retry_after_secs }) => {
+            let mut r = wire_error(
+                wire,
+                429,
+                "arouter_token_budget",
+                "token daily budget exhausted (resets at UTC midnight)".into(),
+            );
+            if let Ok(v) = header::HeaderValue::from_str(&retry_after_secs.to_string()) {
+                r.headers_mut().insert(header::RETRY_AFTER, v);
+            }
+            return r;
+        }
     };
     if !crate::config::POOLS.contains(&pool) {
         return wire_error(
@@ -668,6 +731,27 @@ async fn handle_chat(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    // E10b: a token's group scope applies to the CLIENT-FACING surface —
+    // the requested id (group or group-grade). Scoped tokens must address
+    // a group; out-of-scope requests never reach candidate selection, so
+    // out-of-scope upstreams are never contacted.
+    if let Some(groups) = tok_scopes.as_ref().and_then(|s| s.groups.as_ref()) {
+        if !groups
+            .iter()
+            .any(|p| crate::glob::glob_match(p, &raw_model))
+        {
+            return wire_error(
+                wire,
+                403,
+                "arouter_scope",
+                format!(
+                    "token {} is not scoped to model {raw_model:?} (allows: {:?})",
+                    caller.name, groups
+                ),
+            );
+        }
+    }
+
     // review F3: ASK for usage on streams — many upstreams omit token
     // counts from SSE unless stream_options.include_usage is set, and
     // missing usage silently became zero spend.
@@ -690,10 +774,31 @@ async fn handle_chat(
     // quota-exhausted) so the 429 can quote a reset-aware Retry-After.
     let est = quota::estimate_request(&payload);
     let qstate = st.quota.current();
+    // E10b: token scopes intersect the candidate set BEFORE any
+    // ordering (grade sort included) — an out-of-scope model is dropped,
+    // never deprioritized, mirroring the pool hard boundary.
+    let scope_ok = |m: &Model| -> bool {
+        let Some(sc) = &tok_scopes else {
+            return true;
+        };
+        if let Some(pools) = &sc.pools {
+            if !m.pools.iter().any(|p| pools.contains(p)) {
+                return false;
+            }
+        }
+        if let Some(grades) = &sc.grades {
+            let g = reg.ladder.token(m.grade_rank);
+            if !grades.iter().any(|a| a == g) {
+                return false;
+            }
+        }
+        true
+    };
     let build_candidates = |pool: &str| -> (Vec<&Model>, Vec<&Model>) {
         let pre: Vec<&Model> = reg
             .attempt_list(profile, pool, &req)
             .into_iter()
+            .filter(|m| scope_ok(m))
             .filter(|m| !st.health.is_excluded(&m.id))
             .filter(|m| quota::context_fits(m, &est))
             .collect();
@@ -733,6 +838,7 @@ async fn handle_chat(
         let pre: Vec<&Model> = reg
             .group_attempt_list(profile, g, greq)
             .into_iter()
+            .filter(|m| scope_ok(m))
             .filter(|m| !st.health.is_excluded(&m.id))
             .filter(|m| quota::context_fits(m, &est))
             .collect();
@@ -1721,6 +1827,7 @@ async fn relay_success(
             st.usage.clone(),
             st.metrics.clone(),
             st.health.clone(),
+            st.tokens.clone(),
             t0,
             reserve,
         );
@@ -1760,6 +1867,9 @@ async fn relay_success(
         }
         st.usage.record(rec.clone());
         st.metrics.record(&rec);
+        // E10b: token daily budgets accrue settled spend (failures cost
+        // nothing and are not charged).
+        st.tokens.charge_by_caller(&caller.name, rec.cost_usd);
         if wire == Wire::Anthropic {
             let translated = serde_json::from_slice::<serde_json::Value>(&bytes)
                 .map(|v| crate::translate::openai_to_anthropic(&v))
@@ -1898,6 +2008,8 @@ pub struct TapStream {
     /// Budget hold for this stream (ondemand only) — settled with the
     /// actual usage in `finish`, released by Drop if never finished.
     reserve: Option<budget::ReserveGuard>,
+    /// E10b: token daily budgets accrue settled spend on stream finish.
+    tokens: Arc<crate::tokens::TokenStore>,
     /// F12: the concurrency gauge counts the STREAM BODY too — the
     /// handler's own guard dies when it returns headers.
     in_flight: Option<metrics::InFlightGuard>,
@@ -1906,12 +2018,14 @@ pub struct TapStream {
 }
 
 impl TapStream {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         inner: impl Stream<Item = std::io::Result<Bytes>> + Send + 'static,
         meta: TapMeta,
         usage: Arc<UsageLog>,
         metrics: Arc<Metrics>,
         health: Arc<Health>,
+        tokens: Arc<crate::tokens::TokenStore>,
         t0: Instant,
         reserve: Option<budget::ReserveGuard>,
     ) -> Self {
@@ -1923,6 +2037,7 @@ impl TapStream {
             usage,
             metrics,
             health,
+            tokens,
             t0,
             reserve,
             in_flight: Some(in_flight),
@@ -1978,6 +2093,10 @@ impl TapStream {
         };
         self.usage.record(rec.clone());
         self.metrics.record(&rec);
+        // E10b: accrue settled spend against the token's daily budget
+        // ("aborted" streams keep their scanned tokens — they bill).
+        self.tokens
+            .charge_by_caller(&self.meta.caller, rec.cost_usd);
     }
 }
 
@@ -2284,6 +2403,7 @@ mod tests {
         let usage = Arc::new(UsageLog::in_memory());
         let metrics = Arc::new(Metrics::new());
         let health = crate::health::Health::new(Default::default());
+        let tokens = Arc::new(crate::tokens::TokenStore::in_memory());
         {
             let tap = TapStream::new(
                 HeldStream { _guard: () },
@@ -2291,6 +2411,7 @@ mod tests {
                 usage.clone(),
                 metrics.clone(),
                 health.clone(),
+                tokens.clone(),
                 Instant::now(),
                 None,
             );
@@ -2315,6 +2436,7 @@ mod tests {
         let usage = Arc::new(UsageLog::in_memory());
         let metrics = Arc::new(Metrics::new());
         let health = crate::health::Health::new(Default::default());
+        let tokens = Arc::new(crate::tokens::TokenStore::in_memory());
         // a REAL reqwest error (connection refused) — constructing one
         // synthetically isn't public API
         let err = reqwest::get("http://127.0.0.1:1/x")
@@ -2330,6 +2452,7 @@ mod tests {
                 usage.clone(),
                 metrics.clone(),
                 health.clone(),
+                tokens.clone(),
                 Instant::now(),
                 None,
             );

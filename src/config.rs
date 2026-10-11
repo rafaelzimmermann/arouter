@@ -706,9 +706,9 @@ impl Config {
             }
         }
         let mut seen_callers = std::collections::HashSet::new();
-        if self.auth.require && self.callers.is_empty() {
-            return Err("auth.require = true needs at least one [[callers]] entry".into());
-        }
+        // E10b: `auth.require = true` no longer demands a [[callers]]
+        // entry — minted `ark_…` tokens satisfy auth on their own, and
+        // the loopback claim still bootstraps the admin if none exist.
         for c in &self.callers {
             if c.name.is_empty() {
                 return Err("caller name must not be empty".into());
@@ -1275,10 +1275,12 @@ base_url = "https://x"
         let map = CallerMap::from_config(&cfg, &KeyStore::default());
         assert_eq!(map.len(), 2);
 
-        // require with no callers → invalid
+        // require with no callers is VALID since E10b — minted `ark_…`
+        // tokens satisfy auth on their own and the loopback claim still
+        // bootstraps the admin
         let mut cfg = Config::default();
         cfg.auth.require = true;
-        assert!(cfg.validate().unwrap_err().contains("[[callers]]"));
+        cfg.validate().unwrap();
 
         // duplicate / reserved names
         let mut cfg = Config::default();

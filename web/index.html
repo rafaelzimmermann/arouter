@@ -30,9 +30,27 @@
   <section id="panel" hidden>
     <h1>overview</h1>
     <div class="grid" id="stats"></div>
+
+    <h2>api tokens</h2>
+    <p class="dim">
+      `ark_…` keys for agents and teammates. The plaintext is shown once at
+      creation; only a hash is stored. Scopes only ever narrow access.
+    </p>
+    <table id="tokens"><thead>
+      <tr><th>name</th><th>scopes</th><th>spend (utc day)</th><th></th></tr>
+    </thead><tbody></tbody></table>
+    <form id="mktoken">
+      <input id="tk-name" placeholder="name (a-z, 0-9, - _)" required maxlength="32">
+      <input id="tk-groups" placeholder="groups glob, e.g. arouter-subscription*">
+      <input id="tk-pools" placeholder="pools: quota,local,ondemand">
+      <input id="tk-grades" placeholder="grades: A+,A,B">
+      <input id="tk-budget" type="number" step="0.01" min="0" placeholder="daily $ cap">
+      <button>create</button>
+    </form>
+    <pre id="tk-once" class="cmd" hidden></pre>
+
     <h2>next</h2>
     <ul class="dim">
-      <li>E10b — API tokens (<code>ark_…</code>) with grade/pool/model scopes</li>
       <li>E10c — model, provider and quota management</li>
       <li>E10d — users, access rules, settings</li>
     </ul>

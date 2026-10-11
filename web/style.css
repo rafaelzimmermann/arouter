@@ -53,5 +53,14 @@ button {
   cursor: pointer;
 }
 button:hover { border-color: var(--accent); color: var(--accent); }
+table { border-collapse: collapse; width: 100%; margin: 8px 0 12px; font-size: 13px; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+th { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+form#mktoken { display: flex; flex-wrap: wrap; gap: 8px; }
+form#mktoken input {
+  background: var(--panel); color: var(--txt); border: 1px solid var(--line);
+  border-radius: 6px; padding: 7px 10px; font: inherit; min-width: 140px;
+}
+form#mktoken input::placeholder { color: var(--dim); }
 footer { padding: 20px 24px; border-top: 1px solid var(--line); font-size: 12px; }
 ul { padding-left: 18px; }

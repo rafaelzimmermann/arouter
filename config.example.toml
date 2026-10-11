@@ -29,6 +29,9 @@ key  = "key:arouter-ci-local-token"
 
 [auth]
 require = false
+# `require = true` without any [[callers]] is fine when api tokens (see
+# the web UI's Tokens page / README "API tokens") carry the load — `ark_…`
+# tokens authenticate on their own.
 
 [grades]
 ladder = ["A+", "A", "B", "C"]

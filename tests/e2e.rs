@@ -151,6 +151,8 @@ struct TestApp {
     runtime: Arc<RwLock<Arc<proxy::Runtime>>>,
     /// E10 web sessions (claim/session/CSRF tests)
     web: Arc<arouter::web::Web>,
+    /// E10b api tokens (scope/revocation tests)
+    tokens: Arc<arouter::tokens::TokenStore>,
 }
 
 fn test_app(cfg: Config) -> TestApp {
@@ -182,6 +184,7 @@ fn test_app_health_quota(cfg: Config, policy: HealthPolicy, quota_state: QuotaSt
         proxy::Runtime::build(cfg, &keys).unwrap(),
     )));
     let web = Arc::new(arouter::web::Web::new(&web_cfg));
+    let tokens = Arc::new(arouter::tokens::TokenStore::open(dir.to_str().unwrap()).unwrap());
     let state = proxy::AppState {
         runtime: runtime.clone(),
         usage: usage.clone(),
@@ -193,6 +196,7 @@ fn test_app_health_quota(cfg: Config, policy: HealthPolicy, quota_state: QuotaSt
         http,
         started: Instant::now(),
         web: web.clone(),
+        tokens: tokens.clone(),
     };
     TestApp {
         app: proxy::router(state),
@@ -204,6 +208,7 @@ fn test_app_health_quota(cfg: Config, policy: HealthPolicy, quota_state: QuotaSt
         sticky,
         runtime,
         web,
+        tokens,
     }
 }
 
@@ -558,6 +563,408 @@ async fn web_writes_require_same_origin() {
         t.web.session(&sid, arouter::quota::unix_now()).is_none(),
         "server-side revocation"
     );
+}
+
+// ─────────────────── E10b: api tokens ───────────────────
+
+#[tokio::test]
+async fn token_serves_and_records_caller_identity() {
+    let up = good_json().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![model("zai/glm-5.3", "A", &["quota"], &up, 1.0, (0.0, 0.0))];
+    let t = test_app(cfg);
+    let (_, plaintext) = t
+        .tokens
+        .create("pi", arouter::tokens::Scopes::default(), "test")
+        .unwrap();
+
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-subscription",
+        false,
+        bearer(&plaintext),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    // the token becomes a distinct caller identity in the usage log
+    let records = t.usage.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].caller, "token:pi");
+}
+
+#[tokio::test]
+async fn token_revocation_and_unknown_tokens() {
+    let up = good_json().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![model("zai/glm-5.3", "A", &["quota"], &up, 1.0, (0.0, 0.0))];
+    let t = test_app(cfg);
+
+    // an unknown ark_ token is rejected even in open mode — it names a
+    // credential this daemon minted, so unknown = misconfigured
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-subscription",
+        false,
+        bearer("ark_0000000000000000000000000000000000000000000000000000000000000000"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // minted token serves, then revocation is immediate
+    let (listed, plaintext) = t
+        .tokens
+        .create("shortlived", arouter::tokens::Scopes::default(), "test")
+        .unwrap();
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-subscription",
+        false,
+        bearer(&plaintext),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(t.tokens.revoke(&listed.id));
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-subscription",
+        false,
+        bearer(&plaintext),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn token_group_scope_never_contacts_out_of_scope() {
+    // two counting upstreams behind two groups
+    let (quota_up, quota_hits) = counting_good().await;
+    let (local_up, local_hits) = counting_good().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![
+        model("zai/glm-5.3", "A", &["quota"], &quota_up, 1.0, (0.0, 0.0)),
+        model(
+            "strata/qwen3.8",
+            "B",
+            &["local"],
+            &local_up,
+            1.0,
+            (0.0, 0.0),
+        ),
+    ];
+    let t = test_app(cfg);
+    let (_, plaintext) = t
+        .tokens
+        .create(
+            "localonly",
+            arouter::tokens::Scopes {
+                groups: Some(vec!["arouter-local*".into()]),
+                ..Default::default()
+            },
+            "test",
+        )
+        .unwrap();
+
+    // out-of-scope group: 403 before candidate selection — the quota
+    // upstream is never contacted
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-subscription",
+        false,
+        bearer(&plaintext),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(quota_hits.load(Ordering::SeqCst), 0, "never contacted");
+
+    // in-scope group serves via the local upstream
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-local",
+        false,
+        bearer(&plaintext),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(local_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(quota_hits.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn token_pool_scope_is_a_hard_boundary() {
+    // subscription falls back to local; a quota-only token must NOT
+    // silently fall into the local fallback
+    let (local_up, local_hits) = counting_good().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![model(
+        "strata/qwen3.8",
+        "B",
+        &["local"],
+        &local_up,
+        1.0,
+        (0.0, 0.0),
+    )];
+    let t = test_app(cfg);
+    let (_, plaintext) = t
+        .tokens
+        .create(
+            "quotaonly",
+            arouter::tokens::Scopes {
+                pools: Some(vec!["quota".into()]),
+                ..Default::default()
+            },
+            "test",
+        )
+        .unwrap();
+
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-subscription",
+        false,
+        bearer(&plaintext),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        local_hits.load(Ordering::SeqCst),
+        0,
+        "out-of-scope pool never contacted"
+    );
+
+    // unscoped requests still fall back to local — the filter is
+    // per-token, not global
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-subscription",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(local_hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn token_grade_scope_filters_before_sort() {
+    // two quota models, A and B — a B-only token must be served by the
+    // B upstream with the A upstream untouched
+    let (a_up, a_hits) = counting_good().await;
+    let (b_up, b_hits) = counting_good().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![
+        model("zai/glm-5.3", "A", &["quota"], &a_up, 1.0, (0.0, 0.0)),
+        model("deepseek/v4.x", "B", &["quota"], &b_up, 1.0, (0.0, 0.0)),
+    ];
+    let t = test_app(cfg);
+    let (_, plaintext) = t
+        .tokens
+        .create(
+            "bonly",
+            arouter::tokens::Scopes {
+                grades: Some(vec!["B".into()]),
+                ..Default::default()
+            },
+            "test",
+        )
+        .unwrap();
+
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-subscription",
+        false,
+        bearer(&plaintext),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(b_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        a_hits.load(Ordering::SeqCst),
+        0,
+        "A-grade model filtered pre-sort"
+    );
+}
+
+#[tokio::test]
+async fn token_daily_budget_exhaustion_429() {
+    let up = good_json().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![model("zai/glm-5.3", "A", &["quota"], &up, 1.0, (0.0, 0.0))];
+    let t = test_app(cfg);
+    let (_, plaintext) = t
+        .tokens
+        .create(
+            "budgeted",
+            arouter::tokens::Scopes {
+                daily_budget_usd: Some(0.19),
+                ..Default::default()
+            },
+            "test",
+        )
+        .unwrap();
+
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-subscription",
+        false,
+        bearer(&plaintext),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // the deepseek dashboard said 19 cents — spend it all
+    t.tokens.charge_by_caller("token:budgeted", 0.19);
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-subscription",
+        false,
+        bearer(&plaintext),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry = resp
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .expect("retry-after present");
+    assert!(retry > 0 && retry <= 86_400);
+    let body = body_string(resp).await;
+    assert!(body.contains("arouter_token_budget"), "{body}");
+}
+
+#[tokio::test]
+async fn token_admin_endpoints_gated_create_and_revoke() {
+    let mut cfg = Config::default();
+    cfg.web.enabled = true;
+    let t = test_app(cfg);
+    let sid = t.web.mint_session("admin", arouter::quota::unix_now());
+    let cookie = format!("arouter_sid={sid}");
+    let origin_host = ("origin", "http://127.0.0.1:3929");
+    let host = ("host", "127.0.0.1:3929");
+
+    // no session → 401
+    let resp = web_get(&t.app, "/api/tokens", HeaderMap::new()).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // session → list starts empty
+    let mut h = HeaderMap::new();
+    h.insert(header::COOKIE, cookie.parse().unwrap());
+    h.insert(header::ORIGIN, origin_host.1.parse().unwrap());
+    h.insert(header::HOST, host.1.parse().unwrap());
+    let resp = web_get(&t.app, "/api/tokens", h.clone()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    assert_eq!(body["tokens"].as_array().unwrap().len(), 0);
+
+    // create: plaintext returned exactly once
+    let req = Request::post("/api/tokens")
+        .header(header::COOKIE, cookie.clone())
+        .header(header::ORIGIN, origin_host.1)
+        .header(header::HOST, host.1)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({"name": "ci", "pools": ["quota"]}).to_string(),
+        ))
+        .unwrap();
+    let resp = t.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    let plaintext = body["token"].as_str().unwrap().to_string();
+    assert!(plaintext.starts_with("ark_"), "{plaintext}");
+    let id = body["created"]["id"].as_str().unwrap().to_string();
+
+    // the stored list never contains the plaintext
+    let resp = web_get(&t.app, "/api/tokens", h.clone()).await;
+    let listed: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    let arr = listed["tokens"].as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["id"].as_str().unwrap(), id);
+    assert!(!listed.to_string().contains(&plaintext));
+
+    // invalid scopes are rejected at creation
+    let req = Request::post("/api/tokens")
+        .header(header::COOKIE, cookie.clone())
+        .header(header::ORIGIN, origin_host.1)
+        .header(header::HOST, host.1)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({"name": "bad", "pools": ["nope"]}).to_string(),
+        ))
+        .unwrap();
+    let resp = t.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // cross-origin write → 403
+    let req = Request::post("/api/tokens")
+        .header(header::COOKIE, cookie.clone())
+        .header(header::ORIGIN, "http://evil.example")
+        .header(header::HOST, host.1)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::json!({"name": "x"}).to_string()))
+        .unwrap();
+    let resp = t.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // revoke via the endpoint → the plaintext stops authenticating
+    let req = Request::post("/api/tokens/revoke")
+        .header(header::COOKIE, cookie.clone())
+        .header(header::ORIGIN, origin_host.1)
+        .header(header::HOST, host.1)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::json!({"id": id}).to_string()))
+        .unwrap();
+    let resp = t.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(t.tokens.authenticate(&plaintext).is_err());
+}
+
+#[tokio::test]
+async fn tokens_enforced_when_auth_required() {
+    let up = good_json().await;
+    let mut cfg = Config::default();
+    cfg.auth.require = true;
+    cfg.models = vec![model("zai/glm-5.3", "A", &["quota"], &up, 1.0, (0.0, 0.0))];
+    let t = test_app(cfg);
+
+    // missing token → 401
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-subscription",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // a minted api token satisfies auth.require
+    let (_, plaintext) = t
+        .tokens
+        .create("legit", arouter::tokens::Scopes::default(), "test")
+        .unwrap();
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-subscription",
+        false,
+        bearer(&plaintext),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // and gates /v1/models the same way
+    let resp = web_get(&t.app, "/v1/models", bearer(&plaintext)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
 }
 
 #[tokio::test]

@@ -32,6 +32,7 @@ use axum::Json;
 use crate::config::WebConfig;
 use crate::proxy::AppState;
 use crate::quota::unix_now;
+use serde::Deserialize;
 
 const COOKIE: &str = "arouter_sid";
 const INDEX_HTML: &str = include_str!("../web/index.html");
@@ -400,6 +401,165 @@ pub async fn api_logout(State(st): State<AppState>, headers: HeaderMap) -> Respo
         Json(serde_json::json!({"ok": true})),
     )
         .into_response()
+}
+
+/// Session gate shared by the admin token endpoints. `csrf` — writes
+/// (POST) must prove same-origin; reads (GET) only need the session,
+/// matching the E10a read endpoints.
+fn admin_gate(st: &AppState, headers: &HeaderMap, csrf: bool) -> Result<(), Box<Response>> {
+    if !st.web.enabled() {
+        return Err(Box::new(not_found()));
+    }
+    if csrf {
+        let host = headers
+            .get(header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        if !origin_ok(headers, host.as_deref(), false) {
+            return Err(Box::new(bad_origin()));
+        }
+    }
+    let now = crate::quota::unix_now();
+    let Some(sid) = cookie_sid(headers) else {
+        return Err(Box::new(unauthenticated()));
+    };
+    if st.web.session(&sid, now).is_none() {
+        return Err(Box::new(unauthenticated()));
+    }
+    Ok(())
+}
+
+/// `GET /api/tokens` — list token metadata (never the hash).
+pub async fn api_tokens(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(resp) = admin_gate(&st, &headers, false) {
+        return *resp;
+    }
+    Json(serde_json::json!({ "tokens": st.tokens.list() })).into_response()
+}
+
+#[derive(Deserialize)]
+struct CreateTokenBody {
+    name: String,
+    #[serde(default)]
+    groups: Option<Vec<String>>,
+    #[serde(default)]
+    pools: Option<Vec<String>>,
+    #[serde(default)]
+    grades: Option<Vec<String>>,
+    #[serde(default)]
+    daily_budget_usd: Option<f64>,
+}
+
+/// `POST /api/tokens` — mint a scoped token. The plaintext is returned
+/// exactly once; only its sha-256 hash is stored.
+pub async fn api_tokens_create(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Err(resp) = admin_gate(&st, &headers, true) {
+        return *resp;
+    }
+    let parsed: CreateTokenBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => return bad_request(format!("invalid json: {e}")),
+    };
+    // validate scopes against the live runtime so typos can't mint a
+    // token that silently matches nothing
+    let rt = st.runtime();
+    if let Some(pools) = &parsed.pools {
+        for p in pools {
+            if !crate::config::POOLS.contains(&p.as_str()) {
+                return bad_request(format!(
+                    "unknown pool {p:?} (valid: {:?})",
+                    crate::config::POOLS
+                ));
+            }
+        }
+    }
+    if let Some(grades) = &parsed.grades {
+        for g in grades {
+            if !rt.registry.ladder.list().contains(g) {
+                return bad_request(format!(
+                    "unknown grade {g:?} (ladder: {})",
+                    rt.registry.ladder.list()
+                ));
+            }
+        }
+    }
+    if let Some(groups) = &parsed.groups {
+        for g in groups {
+            // globs are allowed; at least one group must be able to match
+            if !rt
+                .registry
+                .groups
+                .iter()
+                .any(|grp| crate::glob::glob_match(g, &grp.id))
+            {
+                let known: Vec<&str> = rt.registry.groups.iter().map(|x| x.id.as_str()).collect();
+                return bad_request(format!("no routing group matches {g:?} (known: {known:?})"));
+            }
+        }
+    }
+    if let Some(b) = parsed.daily_budget_usd {
+        if !(0.0..=1_000_000.0).contains(&b) {
+            return bad_request("daily_budget_usd must be in [0, 1000000]".into());
+        }
+    }
+    let scopes = crate::tokens::Scopes {
+        groups: parsed.groups,
+        pools: parsed.pools,
+        grades: parsed.grades,
+        daily_budget_usd: parsed.daily_budget_usd,
+    };
+    let created_by = "admin-session";
+    match st.tokens.create(&parsed.name, scopes, created_by) {
+        Ok((listed, plaintext)) => (
+            StatusCode::CREATED,
+            [(header::CACHE_CONTROL, "no-store".to_string())],
+            Json(serde_json::json!({
+                "token": plaintext,
+                "note": "store this now — it is not shown again",
+                "created": listed,
+            })),
+        )
+            .into_response(),
+        Err(e) => bad_request(e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct RevokeBody {
+    id: String,
+}
+
+/// `POST /api/tokens/revoke` — revoke by id; authentication fails from
+/// the next request on.
+pub async fn api_tokens_revoke(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Err(resp) = admin_gate(&st, &headers, true) {
+        return *resp;
+    }
+    let parsed: RevokeBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => return bad_request(format!("invalid json: {e}")),
+    };
+    if st.tokens.revoke(&parsed.id) {
+        Json(serde_json::json!({"ok": true})).into_response()
+    } else {
+        api_error(
+            StatusCode::NOT_FOUND,
+            "unknown_token",
+            &format!("no token with id {:?}", parsed.id),
+        )
+    }
+}
+
+fn bad_request(msg: String) -> Response {
+    api_error(StatusCode::BAD_REQUEST, "invalid_request", &msg)
 }
 
 #[cfg(test)]

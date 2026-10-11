@@ -245,6 +245,7 @@ async fn serve(
     // config; serving state hot-reloads via the snapshot swap
 
     let usage = Arc::new(UsageLog::open(&cfg.server.state_dir)?);
+    let tokens = Arc::new(arouter::tokens::TokenStore::open(&cfg.server.state_dir)?);
     let metrics = Arc::new(Metrics::new());
     let bind = bind_override.unwrap_or_else(|| cfg.server.bind.clone());
 
@@ -372,6 +373,7 @@ async fn serve(
         http: proxy::client(&cfg.timeouts),
         started: Instant::now(),
         web: web.clone(),
+        tokens,
     };
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;

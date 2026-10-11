@@ -39,6 +39,79 @@ function renderOverview(o) {
   $("login").hidden = true;
 }
 
+// E10b — token management. csv fields become arrays; empty stays empty.
+const csv = (v) => v.trim() ? v.trim().split(/\s*,\s*/) : undefined;
+
+function scopeSummary(sc) {
+  const bits = [];
+  if (sc.groups) bits.push("groups=" + sc.groups.join(","));
+  if (sc.pools) bits.push("pools=" + sc.pools.join(","));
+  if (sc.grades) bits.push("grades=" + sc.grades.join(","));
+  if (sc.daily_budget_usd != null) bits.push("≤$" + sc.daily_budget_usd + "/day");
+  return bits.length ? bits.join(" · ") : "unscoped";
+}
+
+async function renderTokens() {
+  const t = await api("/api/tokens");
+  if (t.status !== 200) return;
+  const rows = $("tokens").querySelector("tbody");
+  rows.replaceChildren();
+  for (const tok of t.body.tokens) {
+    if (tok.revoked) continue;
+    const tr = document.createElement("tr");
+    for (const text of [
+      tok.name + " · " + tok.id,
+      scopeSummary(tok.scopes),
+      "$" + tok.spent_today_usd.toFixed(4),
+    ]) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      tr.append(td);
+    }
+    const td = document.createElement("td");
+    const btn = document.createElement("button");
+    btn.textContent = "revoke";
+    btn.addEventListener("click", async () => {
+      await api("/api/tokens/revoke", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: tok.id }),
+      });
+      renderTokens();
+    });
+    td.append(btn);
+    tr.append(td);
+    rows.append(tr);
+  }
+}
+
+$("mktoken").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const budget = parseFloat($("tk-budget").value);
+  const r = await api("/api/tokens", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: $("tk-name").value.trim(),
+      groups: csv($("tk-groups").value),
+      pools: csv($("tk-pools").value),
+      grades: csv($("tk-grades").value),
+      daily_budget_usd: isNaN(budget) ? undefined : budget,
+    }),
+  });
+  if (r.status === 201) {
+    const once = $("tk-once");
+    once.hidden = false;
+    once.textContent = r.body.token + "   ← copy now, shown once";
+    $("mktoken").reset();
+    renderTokens();
+  } else {
+    const once = $("tk-once");
+    once.hidden = false;
+    once.textContent = "error: " + (r.body.error || r.status);
+  }
+});
+
 async function refresh() {
   $("host").textContent = location.host;
   const s = await api("/api/session");
@@ -52,6 +125,7 @@ async function refresh() {
     Math.max(0, Math.round((s.body.expires_unix - Date.now() / 1000) / 60)) + "m";
   const o = await api("/api/overview");
   if (o.status === 200) renderOverview(o.body);
+  renderTokens();
 }
 
 $("logout").addEventListener("click", async () => {

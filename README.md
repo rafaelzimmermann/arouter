@@ -81,6 +81,34 @@ key     = "env:AROUTER_KEY_ALICE"   # client sends: Authorization: Bearer <key>
 
 Per-caller usage, spend and caps fall out for free: `sum by (caller) (increase(arouter_cost_usd_total[1d]))` in Grafana is spend per person. arouter is plain HTTP — expose it only on trusted networks (LAN/tailnet); keys protect identity, not transport.
 
+### API tokens
+
+For fine-grained clients (one per agent, CI job, teammate) mint `ark_…`
+tokens from the web UI's *Tokens* page or `POST /api/tokens`:
+
+```bash
+curl -s http://127.0.0.1:3929/api/tokens \
+  -H 'Content-Type: application/json' \
+  --cookie "arouter_sid=$SID" -X POST \
+  -d '{"name":"ci","pools":["quota"],"grades":["A+","A"]}'
+```
+
+The plaintext is shown **once**; at rest only a SHA-256 hash is kept
+(`tokens.toml` in the state dir, `0600`). Tokens are revocable anytime
+(`POST /api/tokens/revoke`, effective immediately) and carry scopes that
+only ever **narrow** access:
+
+- `groups` — which client-facing group ids the token may address (globs)
+- `pools` — hard boundary like the pool paths; no silent fallback into
+  out-of-scope pools
+- `grades` — allowed grades; the ladder is cut before routing
+- `daily_budget_usd` — per-token UTC-day spend cap; exceeded → `429
+  arouter_token_budget` with `Retry-After` until UTC midnight
+
+An unknown, revoked or budget-exhausted token is never mapped to
+anonymous: unknown/revoked → `401`, out-of-scope group → `403
+  arouter_scope`, and out-of-scope upstreams are never contacted.
+
 ## Web interface
 
 arouter serves a small web UI on the same port (`/`). There is no default
