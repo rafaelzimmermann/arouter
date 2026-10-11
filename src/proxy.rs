@@ -17,6 +17,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::Stream;
+use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -790,6 +791,11 @@ async fn try_candidates(
         attempts: 0,
         denials: 0,
     };
+    // Role rewrites are per-model (an upstream may reject a role a
+    // sibling accepts), so restore the caller's original `messages`
+    // before applying each candidate's map — a failed attempt with a
+    // mapped payload must not leak into the next candidate.
+    let original_messages = payload.get("messages").cloned();
     for m in candidates
         .iter()
         // review F5: bound candidates per request (documented top-3)
@@ -843,6 +849,10 @@ async fn try_candidates(
                 }
             }
         }
+        if let Some(orig) = &original_messages {
+            payload["messages"] = orig.clone();
+        }
+        apply_role_map(payload, &m.role_map);
         payload["model"] = serde_json::Value::String(m.upstream_name.clone());
         let url = format!("{}/chat/completions", m.base_url);
         let mut rb = st.http.post(&url).json(&payload);
@@ -1646,11 +1656,58 @@ impl UsageScan {
     }
 }
 
+/// Apply a model's outgoing role map (`[[models]].role_map`, e.g.
+/// `developer` → `system` for upstreams that reject the newer role) to a
+/// chat-completions payload in place. Unmapped roles and non-object
+/// messages pass through untouched.
+fn apply_role_map(payload: &mut serde_json::Value, map: &BTreeMap<String, String>) {
+    if map.is_empty() {
+        return;
+    }
+    let Some(msgs) = payload.get_mut("messages").and_then(|m| m.as_array_mut()) else {
+        return;
+    };
+    for msg in msgs.iter_mut() {
+        let from = match msg.get("role").and_then(|r| r.as_str()) {
+            Some(r) => r.to_string(),
+            None => continue,
+        };
+        if let Some(to) = map.get(&from) {
+            msg["role"] = serde_json::Value::String(to.clone());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use futures::pin_mut;
     use std::task::Poll;
+
+    #[test]
+    fn role_map_rewrites_matching_roles_only() {
+        let mut map = BTreeMap::new();
+        map.insert("developer".to_string(), "system".to_string());
+        let mut payload = serde_json::json!({
+            "messages": [
+                {"role": "developer", "content": "sys"},
+                {"role": "user", "content": "hi"},
+                {"content": "no role"}
+            ]
+        });
+        apply_role_map(&mut payload, &map);
+        assert_eq!(payload["messages"][0]["role"], "system");
+        assert_eq!(payload["messages"][1]["role"], "user");
+        assert!(payload["messages"][2].get("role").is_none());
+    }
+
+    #[test]
+    fn role_map_empty_is_noop() {
+        let mut payload = serde_json::json!({"messages": [{"role": "developer"}]});
+        let before = payload.clone();
+        apply_role_map(&mut payload, &BTreeMap::new());
+        assert_eq!(payload, before);
+    }
 
     /// Controllable upstream stream for lifecycle tests: yields nothing
     /// until the test says so (review: barriers, not sleeps).

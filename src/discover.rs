@@ -283,6 +283,7 @@ pub fn merge_discovered(
             profiles: vec![],
             provenance,
             rationale,
+            role_map: None,
         });
     }
     merged

@@ -1042,6 +1042,7 @@ mod tests {
             upstream_name: "x".into(),
             profiles: vec![],
             provenance: "manual".into(),
+            role_map: Default::default(),
         };
         let ma = m("a/m");
         let mb = m("b/m");
@@ -1125,6 +1126,7 @@ mod tests {
             upstream_name: "x".into(),
             profiles: vec![],
             provenance: "manual".into(),
+            role_map: Default::default(),
         };
         let mp = m("x/pricey", 9.0, 27.0);
         let mm = m("x/mid", 1.0, 4.0);
@@ -1192,6 +1194,7 @@ mod tests {
             upstream_name: "x".into(),
             profiles: vec![],
             provenance: "manual".into(),
+            role_map: Default::default(),
         }
     }
 

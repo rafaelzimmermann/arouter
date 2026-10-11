@@ -191,6 +191,16 @@ fn chat_body(model: &str, stream: bool) -> String {
     )
 }
 
+/// Post an arbitrary JSON body (role_map tests need `developer` messages
+/// that the stock `chat_body` helper never produces).
+async fn post_chat_body(app: &Router, path: &str, body: String, headers: HeaderMap) -> Response {
+    let mut req = Request::post(path).body(Body::from(body)).unwrap();
+    for (k, v) in &headers {
+        req.headers_mut().insert(k, v.clone());
+    }
+    app.clone().oneshot(req).await.unwrap()
+}
+
 async fn post_chat(
     app: &Router,
     path: &str,
@@ -2066,4 +2076,107 @@ async fn local_sticky_disabled_when_ttl_zero() {
     // sticky off: no entries recorded, status shows no local engines either
     let snap = t.usage.snapshot();
     assert!(!snap["usage_by_model"].as_object().unwrap().is_empty());
+}
+
+// ───────────────────── role_map wire compatibility ─────────────────────
+
+/// Upstream that records the roles it received per message and answers
+/// with a plain JSON completion. Panics inside the handler never cross
+/// the task boundary, so assertions run on the captured vec instead.
+async fn role_recording_upstream() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+    let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let seen2 = seen.clone();
+    let base = spawn_upstream(Router::new().route(
+        "/v1/chat/completions",
+        post(move |body: String| {
+            let seen = seen2.clone();
+            async move {
+                let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+                let roles: Vec<String> = v["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|m| m["role"].as_str().unwrap_or("<none>").to_string())
+                    .collect();
+                *seen.lock().unwrap() = roles;
+                ([("content-type", "application/json")], JSON_BODY)
+            }
+        }),
+    ))
+    .await;
+    (base, seen)
+}
+
+/// Same capture, but the upstream answers 500 (for failover tests).
+async fn role_recording_upstream_500() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+    let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let seen2 = seen.clone();
+    let base = spawn_upstream(Router::new().route(
+        "/v1/chat/completions",
+        post(move |body: String| {
+            let seen = seen2.clone();
+            async move {
+                let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+                let roles: Vec<String> = v["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|m| m["role"].as_str().unwrap_or("<none>").to_string())
+                    .collect();
+                *seen.lock().unwrap() = roles;
+                (StatusCode::INTERNAL_SERVER_ERROR, "boom")
+            }
+        }),
+    ))
+    .await;
+    (base, seen)
+}
+
+#[tokio::test]
+async fn role_map_translates_developer_for_strict_upstream() {
+    let (base, seen) = role_recording_upstream().await;
+    let mut m = model("ds/m", "B", &["quota"], &base, 1.0, (0.0, 0.0));
+    m.role_map = Some([("developer".to_string(), "system".to_string())].into());
+    let mut cfg = Config::default();
+    cfg.models = vec![m];
+    let t = test_app(cfg);
+
+    let body = r#"{"model":"B","messages":[
+        {"role":"developer","content":"sys prompt"},
+        {"role":"user","content":"hi"}]}"#
+        .to_string();
+    let resp = post_chat_body(&t.app, "/v1/chat/completions", body, HeaderMap::new()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(hstr(&resp, "x-arouter-upstream"), "ds/m");
+    drop(resp.into_body().collect().await.unwrap());
+    assert_eq!(*seen.lock().unwrap(), vec!["system", "user"]);
+}
+
+#[tokio::test]
+async fn role_map_failure_does_not_leak_into_next_candidate() {
+    // candidate 1: maps developer→system but fails with 500
+    let (failing, mapped_seen) = role_recording_upstream_500().await;
+    // candidate 2: no role_map — must receive the caller's original role
+    let (plain, plain_seen) = role_recording_upstream().await;
+
+    let mut m1 = model("ds/primary", "B", &["quota"], &failing, 2.0, (0.0, 0.0));
+    m1.role_map = Some([("developer".to_string(), "system".to_string())].into());
+    let m2 = model("ds/backup", "B", &["quota"], &plain, 1.0, (0.0, 0.0));
+    let mut cfg = Config::default();
+    cfg.models = vec![m1, m2];
+    let t = test_app(cfg);
+
+    let body = r#"{"model":"B","messages":[
+        {"role":"developer","content":"sys prompt"},
+        {"role":"user","content":"hi"}]}"#
+        .to_string();
+    let resp = post_chat_body(&t.app, "/v1/chat/completions", body, HeaderMap::new()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(hstr(&resp, "x-arouter-upstream"), "ds/backup");
+    drop(resp.into_body().collect().await.unwrap());
+
+    // first candidate got the mapped role before failing…
+    assert_eq!(*mapped_seen.lock().unwrap(), vec!["system", "user"]);
+    // …and the failure did not contaminate the next candidate's payload
+    assert_eq!(*plain_seen.lock().unwrap(), vec!["developer", "user"]);
 }

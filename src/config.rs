@@ -327,6 +327,11 @@ pub struct ModelConfig {
     /// Rationale string for heuristic/auto grades (auditable).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub rationale: String,
+    /// Wire-compat role rewrite applied to outgoing `messages` (e.g.
+    /// `{ developer = "system" }` for upstreams that predate OpenAI's
+    /// `developer` role). Keys/values are chat-completion role names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_map: Option<std::collections::BTreeMap<String, String>>,
 }
 
 impl Default for ModelConfig {
@@ -345,6 +350,7 @@ impl Default for ModelConfig {
             profiles: vec![],
             provenance: String::new(),
             rationale: String::new(),
+            role_map: None,
         }
     }
 }
@@ -935,6 +941,38 @@ auth = "env:ZAI_API_KEY"
         assert_eq!(m.upstream_name(), "gemma");
         m.name = Some("gemma4:26b".into());
         assert_eq!(m.upstream_name(), "gemma4:26b");
+    }
+
+    #[test]
+    fn role_map_parses_and_defaults_to_absent() {
+        let raw = r#"
+[[models]]
+id = "deepseek/deepseek-v4-pro"
+grade = "A+"
+pool = ["ondemand"]
+base_url = "https://api.deepseek.com/v1"
+role_map = { developer = "system" }
+[[models]]
+id = "zai/glm-5.3"
+grade = "A+"
+pool = ["quota"]
+base_url = "https://x"
+"#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert_eq!(
+            cfg.models[0].role_map.as_ref().unwrap()["developer"],
+            "system"
+        );
+        assert!(cfg.models[1].role_map.is_none());
+
+        // …and flows into the runtime registry model
+        let keys = KeyStore::default();
+        let reg = crate::registry::Registry::from_config(&cfg, &keys).unwrap();
+        assert_eq!(
+            reg.models[0].role_map.get("developer").map(String::as_str),
+            Some("system")
+        );
+        assert!(reg.models[1].role_map.is_empty());
     }
 
     #[test]

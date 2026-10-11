@@ -26,6 +26,9 @@ pub struct Model {
     pub profiles: Vec<String>,
     /// `manual` | `auto` | `catalog` | `heuristic` | `unknown`.
     pub provenance: String,
+    /// Outgoing role rewrite (config `[[models]].role_map`), e.g.
+    /// `developer` → `system` for upstreams that reject the newer role.
+    pub role_map: BTreeMap<String, String>,
 }
 
 /// Profile with overlays already merged onto the base routing config.
@@ -74,6 +77,7 @@ impl Registry {
                 } else {
                     m.provenance.clone()
                 },
+                role_map: m.role_map.clone().unwrap_or_default(),
             })
             .collect();
 
