@@ -226,36 +226,58 @@ async fn messages_profile_pool(
     handle_chat(st, &profile, &pool, &headers, body, Wire::Anthropic).await
 }
 
-async fn models_base(State(st): State<AppState>) -> Response {
-    list_models(st, "default", "quota").await
+async fn models_base(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    list_models(st, "default", "quota", &headers).await
 }
-async fn models_local(State(st): State<AppState>) -> Response {
-    list_models(st, "default", "local").await
+async fn models_local(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    list_models(st, "default", "local", &headers).await
 }
-async fn models_ondemand(State(st): State<AppState>) -> Response {
-    list_models(st, "default", "ondemand").await
+async fn models_ondemand(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    list_models(st, "default", "ondemand", &headers).await
 }
-async fn models_profile(State(st): State<AppState>, Path(profile): Path<String>) -> Response {
-    if let Some(resp) = path_profile_guard(&profile) {
-        return resp;
-    }
-    list_models(st, &profile, "quota").await
-}
-async fn models_profile_pool(
+async fn models_profile(
     State(st): State<AppState>,
-    Path((profile, pool)): Path<(String, String)>,
+    Path(profile): Path<String>,
+    headers: HeaderMap,
 ) -> Response {
     if let Some(resp) = path_profile_guard(&profile) {
         return resp;
     }
-    list_models(st, &profile, &pool).await
+    list_models(st, &profile, "quota", &headers).await
+}
+async fn models_profile_pool(
+    State(st): State<AppState>,
+    Path((profile, pool)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(resp) = path_profile_guard(&profile) {
+        return resp;
+    }
+    list_models(st, &profile, &pool, &headers).await
 }
 
 async fn healthz() -> impl IntoResponse {
     (StatusCode::OK, "ok")
 }
 
-async fn status(State(st): State<AppState>) -> Response {
+/// F12: observation endpoints (status/metrics/model listings) honor
+/// caller auth whenever completions do — operational detail (callers,
+/// upstreams, spend) is not open in auth-required mode.
+fn obs_auth(st: &AppState, headers: &HeaderMap) -> Option<Response> {
+    let rt = st.runtime();
+    if !rt.cfg.auth.require {
+        return None;
+    }
+    match resolve_caller(&rt.callers, headers) {
+        Ok(_) => None,
+        Err(msg) => Some(api_error(401, "unauthorized", msg)),
+    }
+}
+
+async fn status(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(resp) = obs_auth(&st, &headers) {
+        return resp;
+    }
     let rt = st.runtime();
     let reg = &rt.registry;
     let snap = st.usage.snapshot();
@@ -388,7 +410,10 @@ async fn status(State(st): State<AppState>) -> Response {
     Json(root).into_response()
 }
 
-async fn metrics_scrape(State(st): State<AppState>) -> Response {
+async fn metrics_scrape(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(resp) = obs_auth(&st, &headers) {
+        return resp;
+    }
     let rt = st.runtime();
     let m = &st.metrics;
     m.gauge_set(
@@ -610,14 +635,12 @@ async fn handle_chat(
             .filter(|m| !st.health.is_excluded(&m.id))
             .filter(|m| quota::context_fits(m, &est))
             .collect();
-        // cheapest-first only for ondemand without a manual/fastest override
-        let mode = if pool == "ondemand" {
-            match reg.pool_preference.get("ondemand").map(String::as_str) {
-                Some("manual") | Some("fastest") => quota::OrderMode::QuotaPool,
-                _ => quota::OrderMode::Cheapest,
-            }
-        } else {
-            quota::OrderMode::QuotaPool
+        // F11: preference resolved ONCE per request — profile overlay
+        // beats pool default; every recognized value maps to an ordering
+        let mode = match reg.preference_for(profile, pool) {
+            "cheapest" if pool == "ondemand" => quota::OrderMode::Cheapest,
+            "fastest" => quota::OrderMode::Fastest,
+            _ => quota::OrderMode::QuotaPool,
         };
         let ordered = quota::order_candidates(
             &qstate,
@@ -957,7 +980,8 @@ async fn try_candidates(
                             continue;
                         }
                     };
-                    st.health.record_success(&m.id);
+                    st.health
+                        .record_success_latency(&m.id, Some(t0.elapsed().as_millis() as u64));
                     return Ok(relay_success(
                         st,
                         rt,
@@ -978,7 +1002,7 @@ async fn try_candidates(
                     )
                     .await);
                 }
-                st.health.record_success(&m.id);
+                st.health.record_success(&m.id); // EMA lands at stream finish
                 return Ok(relay_success(
                     st,
                     rt,
@@ -1340,7 +1364,10 @@ fn extract_usage(bytes: &[u8]) -> (Option<u64>, Option<u64>) {
         .unwrap_or((None, None))
 }
 
-async fn list_models(st: AppState, profile: &str, pool: &str) -> Response {
+async fn list_models(st: AppState, profile: &str, pool: &str, headers: &HeaderMap) -> Response {
+    if let Some(resp) = obs_auth(&st, headers) {
+        return resp;
+    }
     let rt = st.runtime();
     let reg = &rt.registry;
     if profile != "default" && !reg.profiles.contains_key(profile) {
@@ -1435,6 +1462,9 @@ pub struct TapStream {
     /// Budget hold for this stream (ondemand only) — settled with the
     /// actual usage in `finish`, released by Drop if never finished.
     reserve: Option<budget::ReserveGuard>,
+    /// F12: the concurrency gauge counts the STREAM BODY too — the
+    /// handler's own guard dies when it returns headers.
+    in_flight: Option<metrics::InFlightGuard>,
     first_byte: Option<Instant>,
     recorded: bool,
 }
@@ -1449,6 +1479,7 @@ impl TapStream {
         t0: Instant,
         reserve: Option<budget::ReserveGuard>,
     ) -> Self {
+        let in_flight = metrics.in_flight(); // F12: body counts as in-flight
         Self {
             inner: Box::pin(inner),
             scan: UsageScan::default(),
@@ -1458,6 +1489,7 @@ impl TapStream {
             health,
             t0,
             reserve,
+            in_flight: Some(in_flight),
             first_byte: None,
             recorded: false,
         }
@@ -1480,7 +1512,10 @@ impl TapStream {
         }
         self.recorded = true;
         match status {
-            "ok" | "aborted" => self.health.record_success(&self.meta.model),
+            "ok" | "aborted" => self.health.record_success_latency(
+                &self.meta.model,
+                Some(self.t0.elapsed().as_millis() as u64),
+            ),
             "upstream_error" => self.health.record_failure(&self.meta.model, true),
             _ => {}
         }
@@ -1544,6 +1579,8 @@ impl Stream for TapStream {
 impl Drop for TapStream {
     fn drop(&mut self) {
         self.finish("aborted");
+        // F12: stream body over — release the in-flight gauge slot
+        drop(self.in_flight.take());
     }
 }
 

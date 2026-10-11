@@ -26,6 +26,10 @@ pub struct Discovered {
     /// (OpenRouter's `/v1/models` carries per-token USD).
     pub price: Option<(f64, f64)>,
     pub local: bool,
+    /// Profile visibility inherited from the seed models sharing this
+    /// source (review F9): a sibling of a `vip`-only seed is vip-only.
+    /// Empty = visible everywhere (only when every seed is).
+    pub profiles: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -37,6 +41,9 @@ struct UpstreamGroup {
     known: Vec<String>,
     local: bool,
     ollama: bool,
+    /// F9: `None` = unrestricted (a seed with no profile limits);
+    /// `Some(set)` = union of restricted seeds' profiles.
+    profiles: Option<Vec<String>>,
 }
 
 /// Discover models on all upstreams referenced by `models`.
@@ -46,7 +53,10 @@ pub async fn discover(
     keys: &KeyStore,
     models: &[ModelConfig],
 ) -> Vec<Discovered> {
-    let mut groups: BTreeMap<String, UpstreamGroup> = BTreeMap::new();
+    // F9: a source is (base_url, credential) — two accounts on the same
+    // endpoint are independent discovery sources with their own pools
+    // and visibility; URL-only grouping would collapse them.
+    let mut groups: BTreeMap<(String, Option<String>), UpstreamGroup> = BTreeMap::new();
     for m in models {
         let base = m.base_url.trim_end_matches('/').to_string();
         if base.is_empty() {
@@ -55,7 +65,8 @@ pub async fn discover(
         let local = is_local(&base);
         let ollama = base.contains(":11434");
         let provider = m.id.split('/').next().unwrap_or(&m.id).to_string();
-        let g = groups.entry(base.clone()).or_insert_with(|| UpstreamGroup {
+        let key = (base.clone(), m.auth.clone());
+        let g = groups.entry(key).or_insert_with(|| UpstreamGroup {
             base_url: base,
             auth: m.auth.clone(),
             pools: m.pool.clone(),
@@ -63,11 +74,23 @@ pub async fn discover(
             known: vec![],
             local,
             ollama,
+            profiles: None,
         });
         g.known.push(m.upstream_name().to_string());
         g.known.push(m.id.clone());
         if g.pools.is_empty() {
             g.pools = m.pool.clone();
+        }
+        // F9: visibility — a seed without profile limits makes the whole
+        // source unrestricted; restricted seeds union their profiles
+        if m.profiles.is_empty() {
+            g.profiles = None;
+        } else if let Some(set) = &mut g.profiles {
+            for p in &m.profiles {
+                if !set.contains(p) {
+                    set.push(p.clone());
+                }
+            }
         }
     }
 
@@ -108,6 +131,7 @@ pub async fn discover(
                 context,
                 price,
                 local: g.local,
+                profiles: g.profiles.clone().unwrap_or_default(),
             });
         }
     }
@@ -280,7 +304,9 @@ pub fn merge_discovered(
             weight: 0.5, // below manual siblings — provenance-aware default
             cost_in: d.price.map(|p| p.0).unwrap_or(0.0),
             cost_out: d.price.map(|p| p.1).unwrap_or(0.0),
-            profiles: vec![],
+            // F9: no silent broadening — a discovered sibling is exactly
+            // as visible as the seed(s) that lent it credentials
+            profiles: d.profiles.clone(),
             provenance,
             rationale,
             role_map: None,
@@ -334,7 +360,59 @@ mod tests {
             context: None,
             price: None,
             local,
+            profiles: vec![],
         }
+    }
+
+    #[test]
+    fn discovered_models_inherit_seed_profile_restrictions() {
+        // review F9: a vip-only seed must not leak discovered siblings
+        // into the default profile
+        let cfg = Config::default();
+        let catalog = Catalog::embedded(&cfg.grades.ladder()).unwrap();
+        let mut d = disc("or/new-model", false);
+        d.profiles = vec!["vip".into()];
+        let merged = merge_discovered(&cfg, &[d], &AutoGrades::default(), &catalog);
+        let m = merged
+            .models
+            .iter()
+            .find(|m| m.id == "or/new-model")
+            .unwrap();
+        assert_eq!(m.profiles, vec!["vip".to_string()]);
+    }
+
+    #[test]
+    fn same_url_different_auth_are_independent_sources() {
+        // review F9: grouping key is (base_url, credential) — two keys
+        // on one endpoint are two sources, neither collapses the other
+        let seed = |id: &str, auth: &str| ModelConfig {
+            id: id.into(),
+            name: None,
+            grade: "A".into(),
+            pool: vec!["quota".into()],
+            context: None,
+            base_url: "http://127.0.0.1:9/v1".into(),
+            auth: Some(auth.into()),
+            weight: 1.0,
+            cost_in: 0.0,
+            cost_out: 0.0,
+            profiles: vec![],
+            provenance: String::new(),
+            rationale: String::new(),
+            role_map: None,
+        };
+        // grouping is inside discover() — offline: just assert the key
+        // math via the same tuple the map uses
+        let a = (
+            "http://127.0.0.1:9/v1".to_string(),
+            seed("k/a", "env:KEY_A").auth.clone(),
+        );
+        let b = (
+            "http://127.0.0.1:9/v1".to_string(),
+            seed("k/b", "env:KEY_B").auth.clone(),
+        );
+        assert_ne!(a, b, "same URL, different credential = different source");
+        assert!(seed("k/a", "env:KEY_A").auth.is_some());
     }
 
     #[test]

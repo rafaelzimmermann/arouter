@@ -101,6 +101,9 @@ struct Inner {
     /// Bounded to [`RETENTION_SECS`]; the JSONL file keeps the full audit
     /// trail.
     ring: std::collections::VecDeque<UsageRecord>,
+    /// F12: set when the JSONL sink failed mid-run — surfaced in
+    /// status.json so a degraded audit trail is visible, not silent.
+    sink_degraded: bool,
     /// Cache for the 24h hourly series (E5 monitor): rebuild only when
     /// the ring changed (`total` moved) or the UTC hour rolled.
     hour_cache: Option<HourCache>,
@@ -181,6 +184,7 @@ impl UsageLog {
         Ok(Self {
             inner: Mutex::new(Inner {
                 file,
+                sink_degraded: false,
                 path: Some(path),
                 stats: BTreeMap::new(),
                 callers: BTreeMap::new(),
@@ -199,6 +203,7 @@ impl UsageLog {
             inner: Mutex::new(Inner {
                 file: None,
                 path: None,
+                sink_degraded: false,
                 stats: BTreeMap::new(),
                 callers: BTreeMap::new(),
                 total: 0,
@@ -249,8 +254,12 @@ impl UsageLog {
         if let Some(f) = &mut inner.file {
             let line = serde_json::to_string(&rec).unwrap_or_default();
             if writeln!(f, "{line}").is_err() {
-                // don't spam; switch to memory-only
+                // don't spam; switch to memory-only — but say so once
+                tracing::error!(
+                    "usage log write failed — switching to memory-only                      (budgets keep working, the JSONL audit trail stops)"
+                );
                 inner.file = None;
+                inner.sink_degraded = true;
             }
         }
     }
@@ -279,6 +288,9 @@ impl UsageLog {
             // (in+out, successful attempts only)
             "hourly_by_model": by_model,
             "hourly_by_caller": by_caller,
+            // F12: true when the JSONL sink died mid-run — budgets keep
+            // working from the in-memory ring, the audit file stopped
+            "sink_degraded": inner.sink_degraded,
         })
     }
 
@@ -438,6 +450,32 @@ pub fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sink_degrades_loudly_when_writes_fail() {
+        // /dev/full: opens fine, every write returns ENOSPC — the first
+        // record must flip the sink to memory-only AND surface the
+        // degradation in the status snapshot (F12: never silently).
+        if !std::path::Path::new("/dev/full").exists() {
+            return; // non-Linux: skip
+        }
+        let log = UsageLog::in_memory();
+        {
+            let mut inner = log.inner.lock().unwrap();
+            inner.file = Some(
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open("/dev/full")
+                    .unwrap(),
+            );
+        }
+        log.record(rec("m/x", "ok", Some(1), Some(1)));
+        assert!(log.inner.lock().unwrap().file.is_none());
+        assert!(log.snapshot()["sink_degraded"].as_bool().unwrap());
+        // memory-only keeps counting
+        log.record(rec("m/x", "ok", Some(2), Some(2)));
+        assert_eq!(log.snapshot()["requests_total"].as_u64().unwrap(), 2);
+    }
 
     fn rec(model: &str, status: &str, tin: Option<u64>, tout: Option<u64>) -> UsageRecord {
         UsageRecord {

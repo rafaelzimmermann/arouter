@@ -50,7 +50,7 @@ aitop_mode() { curl -sS -m 10 -X POST localhost:9100/__mode -d "{\"mode\":\"$1\"
 wait_window() { # wait_window <provider> <window> <pct>: poll until the window gauge reflects the fixture
   local prov=$1 win=$2 want=$3 v i
   for i in $(seq 1 20); do
-    v=$(curl -sS -m 5 "$BASE/metrics" | grep -F "arouter_quota_window_pct{provider=\"$prov\",window=\"$win\"} " | awk "{print \$NF}")
+    v=$(curl -sS -m 5 -H "$ALICE" "$BASE/metrics" | grep -F "arouter_quota_window_pct{provider=\"$prov\",window=\"$win\"} " | awk "{print \$NF}")
     [ "$v" = "$want" ] && return 0
     sleep 0.5
   done
@@ -60,7 +60,7 @@ wait_window() { # wait_window <provider> <window> <pct>: poll until the window g
 wait_drain() { # wait_drain <provider> <-1|up>: poll /metrics until the drain gauge reflects the fixture
   local prov=$1 want=$2 v i
   for i in $(seq 1 20); do
-    v=$(curl -sS -m 5 "$BASE/metrics" | grep -F "arouter_quota_drain_reset_secs{provider=\"$prov\"} " | awk "{print \$NF}")
+    v=$(curl -sS -m 5 -H "$ALICE" "$BASE/metrics" | grep -F "arouter_quota_drain_reset_secs{provider=\"$prov\"} " | awk "{print \$NF}")
     if [ "$want" = -1 ] && [ "$v" = -1 ]; then return 0; fi
     if [ "$want" = up ] && [ -n "$v" ] && [ "$v" -gt 0 ]; then return 0; fi
     sleep 0.5
@@ -98,6 +98,13 @@ check "unknown key → 401"              '[ "$(code)" = 401 ]'
 req "$ALICE" /v1/chat/completions "$(printf "$CHAT" "A+")" >/dev/null
 check "valid key → 200 + caller header" '[ "$(code)" = 200 ] && [ "$(hdr caller)" = alice ]'
 
+# F12: with auth.require, observation endpoints speak the same auth —
+# operational detail (callers, spend, upstream inventory) is not open.
+obs=$(curl -sS -m 5 -o /dev/null -w '%{http_code}' "$BASE/status.json")
+check "status.json without key → 401"  '[ "$obs" = 401 ]'
+obs=$(curl -sS -m 5 -H "$ALICE" -o /dev/null -w '%{http_code}' "$BASE/status.json")
+check "status.json with key → 200"     '[ "$obs" = 200 ]'
+
 # ── 2. grade ladder ───────────────────────────────────────────────────────
 check "A+ → stuba/alpha, no degradation" '[ "$(hdr upstream)" = stuba/alpha ] && [ "$(hdr grade)" = "A+" ] && [ -z "$(hdr degraded)" ]'
 
@@ -131,7 +138,7 @@ req "$ALICE" /v1/chat/completions "$(printf "$CHAT" A)" >/dev/null
 check "draining zai beats codex headroom at same grade" \
   '[ "$(code)" = 200 ] && [ "$(hdr upstream)" = stubb/beta ]'
 check "drain countdown gauge positive" \
-  'v=$(curl -sS -m 10 "$BASE/metrics" | grep -F "arouter_quota_drain_reset_secs{provider=\"zai\"}" | awk "{print \$NF}"); [ -n "$v" ] && [ "$v" -gt 0 ]'
+  'v=$(curl -sS -m 10 -H "$ALICE" "$BASE/metrics" | grep -F "arouter_quota_drain_reset_secs{provider=\"zai\"}" | awk "{print \$NF}"); [ -n "$v" ] && [ "$v" -gt 0 ]'
 aitop_mode healthy
 wait_window codex "5h window" 3
 wait_drain zai -1                       # deterministic: next section assumes codex-first ordering
@@ -198,7 +205,7 @@ check "SSE frames + DONE relayed"       'grep -q "data: {" /tmp/it-b && grep -q 
 check "stream content matches stub"     'grep -q "stub stream from" /tmp/it-b'
 mode ok $SD
 sleep 1
-curl -sS -m 15 "$BASE/status.json" > /tmp/it-s.json
+curl -sS -m 15 -H "$ALICE" "$BASE/status.json" > /tmp/it-s.json
 check "usage tap records stream tokens" '[ "$(jq -r ".usage_by_model[\"stubd/zeta\"].tokens_out // 0" /tmp/it-s.json)" -ge 7 ]'
 check "hourly series exposed (24h)"     '[ "$(jq -r ".hourly_by_model[\"stubd/zeta\"] | length" /tmp/it-s.json)" = 24 ]'
 check "caller attribution in status"    '[ "$(jq -r ".callers[\"alice/it\"].requests // 0" /tmp/it-s.json)" -ge 1 ]'

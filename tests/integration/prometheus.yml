@@ -6,5 +6,9 @@ global:
 
 scrape_configs:
   - job_name: arouter
+    # arouter requires caller auth on /metrics when auth.require=true
+    # (F12) — scraping presents a caller key like any other client.
+    authorization:
+      credentials: it-alice-key
     static_configs:
       - targets: ["arouter:3929"]

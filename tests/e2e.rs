@@ -1169,6 +1169,50 @@ async fn per_caller_budget_denies_even_when_pool_allows() {
 }
 
 #[tokio::test]
+async fn profile_preference_overrides_pool_default() {
+    // review F11: preference resolved once, profile overlay beats the
+    // pool default — `manual` in the profile wins over cheapest-by-pool
+    let up = good_json().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![
+        model("or/cheap", "A", &["ondemand"], &up, 1.0, (0.1, 0.1)),
+        model("or/heavy", "A", &["ondemand"], &up, 9.0, (5.0, 20.0)),
+    ];
+    cfg.profiles.insert(
+        "vip".into(),
+        ProfileConfig {
+            preference: Some("manual".into()),
+            ..Default::default()
+        },
+    );
+    let t = test_app(cfg);
+
+    // pool default (cheapest within grade) serves the cheap model
+    let resp = post_chat(
+        &t.app,
+        "/ondemand/v1/chat/completions",
+        "A",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(hstr(&resp, "x-arouter-upstream"), "or/cheap");
+
+    // profile overlay `manual` = weight order → heavyweight serves
+    let resp = post_chat(
+        &t.app,
+        "/vip/ondemand/v1/chat/completions",
+        "A",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(hstr(&resp, "x-arouter-upstream"), "or/heavy");
+}
+
+#[tokio::test]
 async fn runtime_snapshot_swaps_whole_generation() {
     // review F6: budgets/callers hot-reload WITH the registry — one
     // atomic snapshot per request, new generations take effect
@@ -2179,4 +2223,44 @@ async fn role_map_failure_does_not_leak_into_next_candidate() {
     assert_eq!(*mapped_seen.lock().unwrap(), vec!["system", "user"]);
     // …and the failure did not contaminate the next candidate's payload
     assert_eq!(*plain_seen.lock().unwrap(), vec!["developer", "user"]);
+}
+
+#[tokio::test]
+async fn observation_endpoints_follow_auth_require() {
+    // F12: when auth.require=true, status/metrics/model listings speak
+    // the same caller auth as completions — spend and upstream
+    // inventory are operational detail, not open data.
+    let up = good_json().await;
+    let mut cfg = Config::default();
+    cfg.auth.require = true;
+    cfg.callers = vec![CallerConfig {
+        budget_usd_day: None,
+        name: "alice".into(),
+        project: None,
+        key: Some("key:k-alice".into()),
+    }];
+    cfg.models = vec![model("zai/glm-5.2", "A", &["quota"], &up, 1.0, (0.0, 0.0))];
+    let t = test_app(cfg);
+
+    let get = |app: &Router, path: &str, auth: HeaderMap| {
+        let mut req = Request::get(path).body(Body::empty()).unwrap();
+        for (k, v) in &auth {
+            req.headers_mut().insert(k, v.clone());
+        }
+        app.clone().oneshot(req)
+    };
+
+    for path in ["/status.json", "/metrics", "/v1/models"] {
+        let resp = get(&t.app, path, HeaderMap::new()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "open {path}");
+        drop(resp.into_body().collect().await.unwrap());
+    }
+    for path in ["/status.json", "/metrics", "/v1/models"] {
+        let resp = get(&t.app, path, bearer("k-alice")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "authed {path}");
+        drop(resp.into_body().collect().await.unwrap());
+    }
+    // healthz stays open — it is the liveness probe, not data
+    let resp = get(&t.app, "/healthz", HeaderMap::new()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
 }

@@ -81,6 +81,9 @@ struct Inner {
     counters: BTreeMap<&'static str, CounterFamily>,
     gauges: BTreeMap<&'static str, GaugeFamily>,
     hists: BTreeMap<&'static str, HistFamily>,
+    /// F12: bounded label dimensions — one-shot check per record
+    seen_callers: std::collections::BTreeSet<String>,
+    seen_projects: std::collections::BTreeSet<String>,
 }
 
 /// Thread-safe metrics registry. Shared as `Arc<Metrics>` across all
@@ -221,10 +224,45 @@ impl Metrics {
 
     // ───────────────── record helpers (one per UsageRecord) ─────────────────
 
+    /// F12: label cardinality is bounded — open-mode caller/project
+    /// headers must not grow the series maps without limit. Distinct
+    /// values already present keep counting; new ones beyond the cap
+    /// collapse into `overflow`.
+    pub const MAX_CALLER_LABELS: usize = 64;
+    pub const MAX_PROJECT_LABELS: usize = 128;
+
     /// Feed a completed request/attempt record into all relevant families.
+    /// Bounded label value: known values pass; unknown values beyond
+    /// the cap collapse into `overflow` (F12).
+    fn bounded(seen: &mut std::collections::BTreeSet<String>, value: &str, cap: usize) -> String {
+        if value.is_empty() || seen.contains(value) || seen.len() < cap {
+            if !value.is_empty() {
+                seen.insert(value.to_string());
+            }
+            value.to_string()
+        } else {
+            "overflow".to_string()
+        }
+    }
+
     pub fn record(&self, rec: &UsageRecord) {
-        let caller = rec.caller.as_str();
-        let project = rec.project.clone().unwrap_or_default();
+        // F12: sanitize once, use everywhere — series maps stay bounded
+        // even when open-mode headers carry arbitrary caller/project ids
+        let (caller, project) = {
+            let mut inner = self.inner.lock().unwrap();
+            let c = Self::bounded(
+                &mut inner.seen_callers,
+                &rec.caller,
+                Self::MAX_CALLER_LABELS,
+            );
+            let p = Self::bounded(
+                &mut inner.seen_projects,
+                rec.project.as_deref().unwrap_or(""),
+                Self::MAX_PROJECT_LABELS,
+            );
+            (c, p)
+        };
+        let caller = caller.as_str();
         self.counter_inc(
             N_REQUESTS_TOTAL,
             H_REQUESTS_TOTAL,

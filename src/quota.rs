@@ -607,6 +607,9 @@ pub fn est_cost(m: &Model, est: &RequestEstimate) -> f64 {
 pub enum OrderMode {
     QuotaPool,
     Cheapest,
+    /// observed speed first within the grade (F11): latency EMA from
+    /// health, unseen models last
+    Fastest,
 }
 
 /// Sort candidates for the request. Consumes and returns a sorted Vec.
@@ -638,7 +641,22 @@ pub fn order_candidates<'a>(
         .collect();
 
     let mut out = scored;
-    if mode == OrderMode::Cheapest {
+    if mode == OrderMode::Fastest {
+        // F11: grade primary, then observed latency EMA ascending —
+        // the preference `fastest` finally means something
+        let speed = |s: &(&Model, f64, f64, f64, u64)| {
+            health.speed_ema_ms(&s.0.id).unwrap_or(f64::INFINITY)
+        };
+        out.sort_by(|a, b| {
+            a.0.grade_rank.cmp(&b.0.grade_rank).then_with(|| {
+                speed(a)
+                    .partial_cmp(&speed(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| (b.1 * b.2).total_cmp(&(a.1 * a.2)))
+                    .then_with(|| a.0.id.cmp(&b.0.id))
+            })
+        });
+    } else if mode == OrderMode::Cheapest {
         // grade is always primary (§4/§5): cheapest-first orders *within*
         // each allowed grade — never silently drops a grade to save money.
         out.sort_by(|a, b| {
@@ -1142,6 +1160,51 @@ mod tests {
         );
         let ids: Vec<&str> = ordered.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["x/cheap", "x/mid", "x/pricey"]);
+    }
+
+    #[test]
+    fn fastest_orders_within_grade_by_observed_latency() {
+        // F11: preference `fastest` = grade primary, then latency EMA
+        let quota = QuotaState::default();
+        let health = crate::health::Health::new(crate::health::HealthPolicy::default());
+        let est = RequestEstimate {
+            est_in: 100.0,
+            est_out: 100.0,
+            max_tokens: None,
+        };
+        let m = |id: &str, rank: usize| Model {
+            id: id.into(),
+            grade_rank: rank,
+            pools: vec!["quota".into()],
+            base_url: "http://x".into(),
+            api_key: None,
+            weight: 1.0,
+            context: None,
+            cost_in: 1.0,
+            cost_out: 4.0,
+            blended_cost: 0.0,
+            upstream_name: "x".into(),
+            profiles: vec![],
+            provenance: "manual".into(),
+            role_map: Default::default(),
+        };
+        let slow = m("x/slow", 1);
+        let fast = m("x/fast", 1);
+        let unseen = m("x/unseen", 1);
+        let top = m("x/top-grade", 0); // grade always primary
+        health.record_success_latency("x/slow", Some(900));
+        health.record_success_latency("x/fast", Some(40));
+        let cands: Vec<&Model> = vec![&slow, &unseen, &top, &fast];
+        let ordered = order_candidates(
+            &quota,
+            &health,
+            &ProviderMap::default(),
+            OrderMode::Fastest,
+            &est,
+            cands,
+        );
+        let ids: Vec<&str> = ordered.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["x/top-grade", "x/fast", "x/slow", "x/unseen"]);
     }
 
     #[test]

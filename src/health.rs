@@ -75,6 +75,9 @@ struct Entry {
     cooldown_until: Option<Instant>,
     circuit_until: Option<Instant>,
     samples: VecDeque<(Instant, bool)>,
+    /// observed latency EMA in ms (`fastest` preference, review F11);
+    /// None until the first success — unseen models tie at the end.
+    speed_ema_ms: Option<f64>,
 }
 
 impl Entry {
@@ -128,11 +131,24 @@ impl Health {
     /// Record a served request: clears the cooldown ladder and counts a
     /// success sample (which closes an expired circuit for good).
     pub fn record_success(&self, id: &str) {
+        self.record_success_latency(id, None);
+    }
+
+    /// Success with observed latency (ms) — feeds the `fastest`
+    /// preference (F11); buffered relays and stream finalization both
+    /// know their wall time.
+    pub fn record_success_latency(&self, id: &str, latency_ms: Option<u64>) {
         let now = Instant::now();
         let mut map = self.entries.lock().unwrap();
         let e = map.entry(id.to_string()).or_default();
         e.step = 0;
         e.cooldown_until = None;
+        if let Some(ms) = latency_ms {
+            e.speed_ema_ms = Some(match e.speed_ema_ms {
+                Some(prev) => prev * 0.75 + ms as f64 * 0.25,
+                None => ms as f64,
+            });
+        }
         // an expired circuit is closed by a healthy probe
         if e.circuit_until.map(|t| t <= now).unwrap_or(true) {
             e.circuit_until = None;
@@ -184,6 +200,15 @@ impl Health {
     /// Ordering penalty for E3 quota scoring: × 0.5 while the recent
     /// failure ratio is above the circuit threshold but the circuit has
     /// not tripped yet (docs/routing.md §3).
+    /// Observed latency EMA (ms) for `fastest` ordering (F11).
+    pub fn speed_ema_ms(&self, id: &str) -> Option<f64> {
+        self.entries
+            .lock()
+            .unwrap()
+            .get(id)
+            .and_then(|e| e.speed_ema_ms)
+    }
+
     pub fn penalty(&self, id: &str) -> f64 {
         let map = self.entries.lock().unwrap();
         match map.get(id) {

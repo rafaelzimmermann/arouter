@@ -106,6 +106,19 @@ where
     if let Some(b) = pool_b {
         check_layer(&spend, b, None, None, now, est_usd, "pool")?;
     }
+    // F11: per-request cap on the PROFILE layer too — a profile with
+    // `per_request_usd = 0.01` must not admit a $1 estimate
+    if let Some(b) = prof_b.filter(|b| b.per_request_usd > 0.0) {
+        if est_usd > b.per_request_usd {
+            return Err(Denial {
+                layer: "profile",
+                window: "per_request",
+                cap: b.per_request_usd,
+                spent: 0.0,
+                est: est_usd,
+            });
+        }
+    }
     // profile layer (spend within this profile)
     if let Some(b) = prof_b {
         check_layer(&spend, b, Some(profile), None, now, est_usd, "profile")?;
@@ -338,6 +351,36 @@ mod tests {
             name: "alice".into(),
             project: None,
         }
+    }
+
+    #[test]
+    fn profile_per_request_cap_denies_big_estimates() {
+        // F11: per_request_usd exists on every budget layer — enforce it
+        let usage = UsageLog::in_memory();
+        let mut cfg = Config::default();
+        cfg.pool.insert(
+            "ondemand".into(),
+            crate::config::PoolConfig {
+                preference: "cheapest".into(),
+                budget: Some(BudgetConfig::default()),
+            },
+        );
+        cfg.profiles.insert(
+            "frugal".into(),
+            crate::config::ProfileConfig {
+                budget: Some(BudgetConfig {
+                    per_request_usd: 0.01,
+                    ..BudgetConfig::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let d = preflight(&usage, &cfg, "frugal", &alice(), 1.0).unwrap_err();
+        assert_eq!(d.layer, "profile");
+        assert_eq!(d.window, "per_request");
+        assert!((d.cap - 0.01).abs() < 1e-9);
+        // small estimates still pass
+        assert!(preflight(&usage, &cfg, "frugal", &alice(), 0.005).is_ok());
     }
 
     #[test]
