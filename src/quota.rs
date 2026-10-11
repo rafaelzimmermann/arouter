@@ -907,7 +907,7 @@ mod tests {
         };
         let models = vec![
             Model {
-            wire: "openai".into(),
+                wire: "openai".into(),
                 id: "slow/m".into(),
                 grade_rank: 1,
                 ..Default::default()
@@ -934,7 +934,7 @@ mod tests {
         };
         let models = vec![
             Model {
-            wire: "openai".into(),
+                wire: "openai".into(),
                 id: "a/m".into(),
                 grade_rank: 1,
                 ..Default::default()

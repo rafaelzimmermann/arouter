@@ -36,10 +36,16 @@ pub struct CodexError {
 
 impl CodexError {
     fn bad_request(msg: impl Into<String>) -> Self {
-        Self { status: 400, message: msg.into() }
+        Self {
+            status: 400,
+            message: msg.into(),
+        }
     }
     fn login(msg: &str) -> Self {
-        Self { status: 503, message: format!("{msg}; run codex login") }
+        Self {
+            status: 503,
+            message: format!("{msg}; run codex login"),
+        }
     }
 }
 
@@ -82,7 +88,8 @@ pub async fn read_login() -> Result<CodexLogin, CodexError> {
 
 /// Pure core of [`read_login`] (unit-tested).
 pub fn read_login_from(raw: &str, now: u64) -> Result<CodexLogin, String> {
-    let auth: Value = serde_json::from_str(raw).map_err(|_| "Cannot parse Codex login".to_string())?;
+    let auth: Value =
+        serde_json::from_str(raw).map_err(|_| "Cannot parse Codex login".to_string())?;
     if auth.get("auth_mode").and_then(Value::as_str) != Some("chatgpt") {
         return Err("A ChatGPT subscription login is required".into());
     }
@@ -159,7 +166,9 @@ fn unix_now_secs() -> u64 {
 /// mode; buffering is done on our side for non-streaming clients).
 /// `model` is the upstream model name.
 pub fn openai_to_codex(body: &Value, model: &str) -> Result<Value, CodexError> {
-    let obj = body.as_object().ok_or_else(|| invalid("request body must be a JSON object"))?;
+    let obj = body
+        .as_object()
+        .ok_or_else(|| invalid("request body must be a JSON object"))?;
     if let Some(n) = obj.get("n").and_then(Value::as_u64) {
         if n != 1 {
             return Err(invalid("only n=1 is supported by the codex wire"));
@@ -215,7 +224,9 @@ pub fn openai_to_codex(body: &Value, model: &str) -> Result<Value, CodexError> {
     out.insert("stream".into(), json!(true));
     out.insert(
         "instructions".into(),
-        json!(instructions.filter(|s| !s.is_empty()).unwrap_or_else(|| DEFAULT_INSTRUCTIONS.into())),
+        json!(instructions
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_INSTRUCTIONS.into())),
     );
     out.insert("input".into(), Value::Array(input));
     out.insert("text".into(), json!({ "verbosity": "low" }));
@@ -230,7 +241,10 @@ pub fn openai_to_codex(body: &Value, model: &str) -> Result<Value, CodexError> {
         .and_then(Value::as_str)
         .filter(|s| ["minimal", "low", "medium", "high"].contains(s))
         .unwrap_or("low");
-    out.insert("reasoning".into(), json!({ "effort": effort, "summary": "auto" }));
+    out.insert(
+        "reasoning".into(),
+        json!({ "effort": effort, "summary": "auto" }),
+    );
     if let Some(tools) = tools_of(obj) {
         out.insert("tools".into(), tools);
     }
@@ -245,7 +259,9 @@ fn map_tool_choice(body: &Value) -> Result<Value, CodexError> {
         }
         Some(v)
             if v.get("type").and_then(Value::as_str) == Some("function")
-                && v.pointer("/function/name").and_then(Value::as_str).is_some() =>
+                && v.pointer("/function/name")
+                    .and_then(Value::as_str)
+                    .is_some() =>
         {
             Ok(json!({ "type": "function", "name": v.pointer("/function/name").unwrap() }))
         }
@@ -304,7 +320,9 @@ fn text_of(content: Option<&Value>) -> Result<String, CodexError> {
 fn input_parts(content: Option<&Value>) -> Result<Vec<Value>, CodexError> {
     match content {
         None | Some(Value::Null) => Ok(vec![]),
-        Some(Value::String(s)) if !s.is_empty() => Ok(vec![json!({ "type": "input_text", "text": s })]),
+        Some(Value::String(s)) if !s.is_empty() => {
+            Ok(vec![json!({ "type": "input_text", "text": s })])
+        }
         Some(Value::String(_)) => Ok(vec![]),
         Some(Value::Array(parts)) => {
             let mut out = vec![];
@@ -322,7 +340,9 @@ fn input_parts(content: Option<&Value>) -> Result<Vec<Value>, CodexError> {
                         if !url.starts_with("data:image/") {
                             return Err(invalid("images must use base64 data URLs"));
                         }
-                        out.push(json!({ "type": "input_image", "detail": "auto", "image_url": url }));
+                        out.push(
+                            json!({ "type": "input_image", "detail": "auto", "image_url": url }),
+                        );
                     }
                     _ => return Err(invalid("unsupported content part")),
                 }
@@ -337,7 +357,9 @@ fn input_parts(content: Option<&Value>) -> Result<Vec<Value>, CodexError> {
 /// form), otherwise an array of input parts (text + images).
 fn output_parts(content: Option<&Value>) -> Result<Value, CodexError> {
     let parts = input_parts(content)?;
-    let has_image = parts.iter().any(|p| p.get("type").and_then(Value::as_str) == Some("input_image"));
+    let has_image = parts
+        .iter()
+        .any(|p| p.get("type").and_then(Value::as_str) == Some("input_image"));
     if !has_image {
         let text = parts
             .iter()
@@ -367,7 +389,9 @@ fn assistant_items(m: &Value) -> Result<Vec<Value>, CodexError> {
                 return Err(invalid("only function tool calls are supported"));
             }
             let (id, name, args) = (
-                call.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()),
+                call.get("id")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty()),
                 call.pointer("/function/name").and_then(Value::as_str),
                 call.pointer("/function/arguments").and_then(Value::as_str),
             );
@@ -394,7 +418,12 @@ fn assistant_items(m: &Value) -> Result<Vec<Value>, CodexError> {
 /// the Codex transports do: `…[/codex][/responses]`.
 pub fn responses_url(base_url: &str) -> String {
     let raw = base_url.trim();
-    let base = if raw.is_empty() { DEFAULT_BASE_URL } else { raw }.trim_end_matches('/');
+    let base = if raw.is_empty() {
+        DEFAULT_BASE_URL
+    } else {
+        raw
+    }
+    .trim_end_matches('/');
     if base.ends_with("/codex/responses") {
         base.to_string()
     } else if base.ends_with("/codex") {
@@ -479,8 +508,10 @@ impl CodexParser {
                     if item.get("type").and_then(Value::as_str) == Some("function_call") {
                         let call_id = item.get("call_id").and_then(Value::as_str).unwrap_or("");
                         let name = item.get("name").and_then(Value::as_str).unwrap_or("");
-                        let args =
-                            item.get("arguments").and_then(Value::as_str).unwrap_or("{}");
+                        let args = item
+                            .get("arguments")
+                            .and_then(Value::as_str)
+                            .unwrap_or("{}");
                         self.tool_calls.push(json!({
                             "id": call_id,
                             "type": "function",
@@ -538,7 +569,11 @@ impl CodexParser {
         message.insert("role".into(), json!("assistant"));
         message.insert(
             "content".into(),
-            if self.text.is_empty() && calls { Value::Null } else { json!(self.text) },
+            if self.text.is_empty() && calls {
+                Value::Null
+            } else {
+                json!(self.text)
+            },
         );
         if calls {
             message.insert("tool_calls".into(), Value::Array(self.tool_calls.clone()));
@@ -645,7 +680,12 @@ pub struct SseTranslator {
 
 impl SseTranslator {
     pub fn new(model: &str) -> Self {
-        Self { buf: vec![], parser: CodexParser::new(model), frames: Default::default(), failed: None }
+        Self {
+            buf: vec![],
+            parser: CodexParser::new(model),
+            frames: Default::default(),
+            failed: None,
+        }
     }
 
     pub fn push_bytes(&mut self, bytes: &[u8]) {
@@ -869,7 +909,10 @@ mod tests {
         assert_eq!(input[0]["role"], "user");
         assert_eq!(input[0]["content"][0]["type"], "input_text");
         assert_eq!(input[0]["content"][1]["type"], "input_image");
-        assert_eq!(input[0]["content"][1]["image_url"], "data:image/png;base64,QUJD");
+        assert_eq!(
+            input[0]["content"][1]["image_url"],
+            "data:image/png;base64,QUJD"
+        );
         assert_eq!(input[1]["type"], "message");
         assert_eq!(input[1]["content"][0]["type"], "output_text");
         assert_eq!(input[2]["type"], "function_call");
@@ -908,7 +951,10 @@ mod tests {
         let mut b = chat_body();
         b["tool_choice"] = json!({ "type": "function", "function": { "name": "read" } });
         let out = openai_to_codex(&b, "m").unwrap();
-        assert_eq!(out["tool_choice"], json!({ "type": "function", "name": "read" }));
+        assert_eq!(
+            out["tool_choice"],
+            json!({ "type": "function", "name": "read" })
+        );
     }
 
     #[test]
@@ -920,10 +966,22 @@ mod tests {
 
     #[test]
     fn responses_url_forms() {
-        assert_eq!(responses_url(""), "https://chatgpt.com/backend-api/codex/responses");
-        assert_eq!(responses_url("https://chatgpt.com/backend-api/"), "https://chatgpt.com/backend-api/codex/responses");
-        assert_eq!(responses_url("http://localhost:9/codex"), "http://localhost:9/codex/responses");
-        assert_eq!(responses_url("http://localhost:9/codex/responses"), "http://localhost:9/codex/responses");
+        assert_eq!(
+            responses_url(""),
+            "https://chatgpt.com/backend-api/codex/responses"
+        );
+        assert_eq!(
+            responses_url("https://chatgpt.com/backend-api/"),
+            "https://chatgpt.com/backend-api/codex/responses"
+        );
+        assert_eq!(
+            responses_url("http://localhost:9/codex"),
+            "http://localhost:9/codex/responses"
+        );
+        assert_eq!(
+            responses_url("http://localhost:9/codex/responses"),
+            "http://localhost:9/codex/responses"
+        );
     }
 
     // ── response side ──
@@ -939,7 +997,10 @@ mod tests {
     }
 
     fn terminal(usage: Value) -> Value {
-        ev("response.completed", json!({ "response": { "status": "completed", "usage": usage } }))
+        ev(
+            "response.completed",
+            json!({ "response": { "status": "completed", "usage": usage } }),
+        )
     }
 
     const USAGE: &str = r#"{
@@ -951,21 +1012,31 @@ mod tests {
     fn buffered_completion_with_tools_and_cache() {
         let mut p = CodexParser::new("gpt-6-astra");
         assert_eq!(
-            p.event(&ev("response.output_text.delta", json!({ "delta": "hel" }))).unwrap(),
+            p.event(&ev("response.output_text.delta", json!({ "delta": "hel" })))
+                .unwrap(),
             vec![Delta::Text("hel".into())]
         );
         assert_eq!(
-            p.event(&ev("response.output_text.delta", json!({ "delta": "lo" }))).unwrap(),
+            p.event(&ev("response.output_text.delta", json!({ "delta": "lo" })))
+                .unwrap(),
             vec![Delta::Text("lo".into())]
         );
         assert_eq!(
-            p.event(&ev("response.reasoning_summary_text.delta", json!({ "delta": "hm" }))).unwrap(),
+            p.event(&ev(
+                "response.reasoning_summary_text.delta",
+                json!({ "delta": "hm" })
+            ))
+            .unwrap(),
             vec![Delta::Reasoning("hm".into())]
         );
-        p.event(&ev("response.output_item.done", json!({ "item": {
-            "type": "function_call", "call_id": "c1", "name": "read", "arguments": "{\"a\":1}" } })))
+        p.event(&ev(
+            "response.output_item.done",
+            json!({ "item": {
+            "type": "function_call", "call_id": "c1", "name": "read", "arguments": "{\"a\":1}" } }),
+        ))
+        .unwrap();
+        p.event(&terminal(serde_json::from_str::<Value>(USAGE).unwrap()))
             .unwrap();
-        p.event(&terminal(serde_json::from_str::<Value>(USAGE).unwrap())).unwrap();
         assert!(p.terminal);
 
         let out = p.completion();
@@ -985,12 +1056,16 @@ mod tests {
     #[test]
     fn buffered_length_and_text_only() {
         let mut p = CodexParser::new("m");
-        p.event(&ev("response.output_text.delta", json!({ "delta": "x" }))).unwrap();
-        p.event(&ev("response.incomplete", json!({ "response": {
+        p.event(&ev("response.output_text.delta", json!({ "delta": "x" })))
+            .unwrap();
+        p.event(&ev(
+            "response.incomplete",
+            json!({ "response": {
             "status": "incomplete",
             "incomplete_details": { "reason": "max_output_tokens" },
-            "usage": serde_json::from_str::<Value>(USAGE).unwrap() } })))
-            .unwrap();
+            "usage": serde_json::from_str::<Value>(USAGE).unwrap() } }),
+        ))
+        .unwrap();
         assert_eq!(p.completion()["choices"][0]["finish_reason"], "length");
     }
 
@@ -1000,12 +1075,18 @@ mod tests {
         assert!(p.event(&ev("error", json!({ "message": "boom" }))).is_err());
         let mut p = CodexParser::new("m");
         assert!(p
-            .event(&ev("response.failed", json!({ "response": { "error": { "code": "x", "message": "bad" } } })))
+            .event(&ev(
+                "response.failed",
+                json!({ "response": { "error": { "code": "x", "message": "bad" } } })
+            ))
             .is_err());
         // incomplete without a reason is an error, not a silent stop
         let mut p = CodexParser::new("m");
         assert!(p
-            .event(&ev("response.incomplete", json!({ "response": { "status": "incomplete" } })))
+            .event(&ev(
+                "response.incomplete",
+                json!({ "response": { "status": "incomplete" } })
+            ))
             .is_err());
     }
 
@@ -1018,12 +1099,19 @@ mod tests {
         tr.push_bytes(b"ta\",\"delta\":\"hi\"}\n\n");
         let f1 = tr.pop_frame().unwrap();
         assert!(f1.starts_with("data: "), "{f1}");
-        assert!(f1.contains("\"role\":\"assistant\""), "role chunk first: {f1}");
+        assert!(
+            f1.contains("\"role\":\"assistant\""),
+            "role chunk first: {f1}"
+        );
         let f2 = tr.pop_frame().unwrap();
         assert!(f2.contains("\"content\":\"hi\""), "{f2}");
         assert!(tr.pop_frame().is_none());
         tr.push_bytes(
-            format!("data: {}\n\n", terminal(serde_json::from_str::<Value>(USAGE).unwrap())).as_bytes(),
+            format!(
+                "data: {}\n\n",
+                terminal(serde_json::from_str::<Value>(USAGE).unwrap())
+            )
+            .as_bytes(),
         );
         let mut all = String::new();
         while let Some(f) = tr.pop_frame() {
@@ -1040,11 +1128,20 @@ mod tests {
         let mut tr = SseTranslator::new("m");
         // argument deltas are NOT streamed out as partial tool calls
         tr.push_bytes(b"data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\\\"a\\\":\"}\n\n");
-        tr.push_bytes(b"data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"1}\"}\n\n");
-        assert!(tr.pop_frame().is_none(), "no frames until the call completes");
+        tr.push_bytes(
+            b"data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"1}\"}\n\n",
+        );
+        assert!(
+            tr.pop_frame().is_none(),
+            "no frames until the call completes"
+        );
         tr.push_bytes(b"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"c9\",\"name\":\"run\",\"arguments\":\"{\\\"a\\\":1}\"}}\n\n");
         tr.push_bytes(
-            format!("data: {}\n\n", terminal(serde_json::from_str::<Value>(USAGE).unwrap())).as_bytes(),
+            format!(
+                "data: {}\n\n",
+                terminal(serde_json::from_str::<Value>(USAGE).unwrap())
+            )
+            .as_bytes(),
         );
         let mut all = String::new();
         while let Some(f) = tr.pop_frame() {
@@ -1089,14 +1186,21 @@ mod tests {
         assert_eq!(out["choices"][0]["finish_reason"], "tool_calls");
         assert_eq!(out["usage"]["prompt_tokens"], 120);
         // truncated stream (no terminal) is an error
-        assert!(parse_buffered_sse(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n", "m").is_err());
+        assert!(parse_buffered_sse(
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+            "m"
+        )
+        .is_err());
     }
 
     #[test]
     fn quota_header_mapping() {
         let mut h = HeaderMap::new();
         h.insert("x-codex-primary-used-percent", "42.5".parse().unwrap());
-        h.insert("x-codex-primary-reset-after-seconds", "3600".parse().unwrap());
+        h.insert(
+            "x-codex-primary-reset-after-seconds",
+            "3600".parse().unwrap(),
+        );
         h.insert("x-codex-secondary-used-percent", "10".parse().unwrap());
         let w = quota_windows(&h, 1000);
         assert_eq!(w.len(), 2);

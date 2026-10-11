@@ -653,14 +653,15 @@ impl Config {
             }
             if let Some(w) = m.wire.as_deref() {
                 if !matches!(w, "openai" | "codex") {
-                    return Err(format!("model {}: unknown wire {w:?} (openai | codex)", m.id));
+                    return Err(format!(
+                        "model {}: unknown wire {w:?} (openai | codex)",
+                        m.id
+                    ));
                 }
             }
             // codex models default to the ChatGPT Codex backend and read
             // the login from the Codex CLI — no base_url or API key needed
-            if m.base_url.is_empty()
-                && m.wire_kind() != "codex"
-            {
+            if m.base_url.is_empty() && m.wire_kind() != "codex" {
                 return Err(format!("model {}: base_url is required", m.id));
             }
             if ladder.rank(&m.grade).is_none() {

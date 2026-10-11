@@ -1251,7 +1251,9 @@ async fn codex_attempt(
         last_error: msg,
         fatal: None,
     };
-    let login = crate::codex::read_login().await.map_err(|e| fail(e.message))?;
+    let login = crate::codex::read_login()
+        .await
+        .map_err(|e| fail(e.message))?;
     let body = crate::codex::openai_to_codex(payload, &m.upstream_name).map_err(|e| {
         // invalid request is the client's fault: no failover, plain 400
         CodexFail {
@@ -1297,7 +1299,8 @@ async fn codex_attempt(
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.trim().parse::<u64>().ok())
                 .unwrap_or(60);
-            st.quota.apply(&prefix, vec![quotaeng::harvest_429(ra)], now);
+            st.quota
+                .apply(&prefix, vec![quotaeng::harvest_429(ra)], now);
         }
         let body_text = truncate(&resp.text().await.unwrap_or_default(), 300);
         let msg = format!("codex upstream {code}: {body_text}");
@@ -1316,7 +1319,11 @@ async fn codex_attempt(
         );
         // 401/403 = login expired or wrong account: behaves like a 503
         // so the next candidate is tried instead of hard-failing
-        let effective = if code == 401 || code == 403 { 503 } else { code };
+        let effective = if code == 401 || code == 403 {
+            503
+        } else {
+            code
+        };
         if retryable(effective) {
             st.health.record_failure(&m.id, true);
             return Err(fail(msg));
@@ -1410,7 +1417,10 @@ async fn codex_attempt(
             raw_model,
             degraded,
             is_stream,
-            Upstream::Buffered("application/json".into(), Bytes::from(completion.to_string())),
+            Upstream::Buffered(
+                "application/json".into(),
+                Bytes::from(completion.to_string()),
+            ),
             t0,
             est,
             cross_from,
@@ -1959,9 +1969,7 @@ where
                 }
                 std::task::Poll::Ready(Some(Err(e))) => {
                     this.out.clear();
-                    return std::task::Poll::Ready(Some(Err(std::io::Error::other(
-                        e.to_string(),
-                    ))));
+                    return std::task::Poll::Ready(Some(Err(std::io::Error::other(e.to_string()))));
                 }
                 std::task::Poll::Ready(None) => {
                     return match this.tr.finish() {
@@ -2154,9 +2162,9 @@ mod tests {
         let err = reqwest::get("http://127.0.0.1:1/x")
             .await
             .expect_err("nothing listens on port 1");
-        let broken = futures::stream::iter(vec![Err::<Bytes, std::io::Error>(std::io::Error::other(
-            err.to_string(),
-        ))]);
+        let broken = futures::stream::iter(vec![Err::<Bytes, std::io::Error>(
+            std::io::Error::other(err.to_string()),
+        )]);
         {
             let tap = TapStream::new(
                 broken,
