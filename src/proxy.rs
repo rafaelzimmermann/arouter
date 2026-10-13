@@ -959,7 +959,7 @@ async fn handle_chat(
     // warm-cache stickiness all apply unchanged.
     let build_group = |g: &crate::registry::Group,
                        greq: &crate::grades::GradeRequest|
-     -> (Vec<&Model>, Vec<&Model>) {
+     -> (Vec<&Model>, Vec<&Model>, bool) {
         let considered = reg.group_attempt_list(profile, g, greq);
         let scope_excluded: Vec<String> = considered
             .iter()
@@ -1002,6 +1002,16 @@ async fn handle_chat(
             &est,
             pre.clone(),
         );
+        // A group fallback is a grade fallback: don't consult it if this
+        // group has any usable candidate at the requested grade. This is
+        // evaluated after scope, health, context and quota filtering, so an
+        // exhausted or otherwise ineligible member does not block fallback.
+        let same_grade_available = ordered_by_policy.iter().any(|m| {
+            let idx = reg.models.iter().position(|candidate| candidate.id == m.id);
+            (greq.whole_ladder || idx.and_then(|i| reg.group_rank(g, i)) == Some(greq.ceiling))
+                && (g.pool.as_deref() == Some("local")
+                    || quota::model_available(&qstate, &rt.provider_map, m))
+        });
         let quota_excluded: Vec<String> = ordered_by_policy
             .iter()
             .filter(|m| {
@@ -1034,12 +1044,15 @@ async fn handle_chat(
                 "no eligible candidates in group"
             );
         }
-        (ordered, pre)
+        (ordered, pre, same_grade_available)
     };
 
-    let (candidates, pre) = match &group_sel {
+    let (candidates, pre, group_same_grade_available) = match &group_sel {
         Some((g, greq)) => build_group(g, greq),
-        None => build_candidates(pool),
+        None => {
+            let (candidates, pre) = build_candidates(pool);
+            (candidates, pre, false)
+        }
     };
     let mut final_err: Option<AttemptErr> = None;
     if !candidates.is_empty() {
@@ -1078,6 +1091,11 @@ async fn handle_chat(
             .map(|p| p.fallback.cross_pool.clone())
             .unwrap_or_else(|| reg.base_fallback.cross_pool.clone())
             .unwrap_or_default(),
+    };
+    let cross = if group_same_grade_available {
+        Vec::new()
+    } else {
+        cross
     };
     let fallback_targets = cross.clone();
     for target in cross {

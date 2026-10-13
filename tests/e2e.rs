@@ -5,7 +5,8 @@
 //! caller identity, and the Prometheus /metrics endpoint.
 
 use arouter::config::{
-    CallerConfig, Config, FallbackConfig, KeyStore, ModelConfig, ProfileConfig, TimeoutsConfig,
+    CallerConfig, Config, FallbackConfig, GroupConfig, KeyStore, ModelConfig, ProfileConfig,
+    TimeoutsConfig,
 };
 use arouter::health::{Health, HealthPolicy};
 use arouter::metrics::Metrics;
@@ -1743,6 +1744,109 @@ async fn routing_groups_bare_grade_pinned_and_fallback() {
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     assert!(body_string(resp).await.contains("arouter-subscription"));
+}
+
+#[tokio::test]
+async fn mixed_pool_group_routes_same_grade_candidates_together() {
+    let zai = good_json().await;
+    let gpt = good_json().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![
+        model("zai/glm", "A", &["quota"], &zai, 1.0, (0.0, 0.0)),
+        model("or/gpt", "A", &["ondemand"], &gpt, 1.0, (1.0, 4.0)),
+    ];
+    cfg.groups = vec![GroupConfig {
+        id: "arouter-team".into(),
+        pool: None,
+        members: vec!["zai/glm".into(), "or/gpt".into()],
+        grades: Default::default(),
+        ladder: vec![],
+        fallback: vec![],
+    }];
+    let t = test_app_quota(cfg, quota_state_exhausted("zai", 3600));
+
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-team-A",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(hstr(&resp, "x-arouter-upstream"), "or/gpt");
+    assert_eq!(hstr(&resp, "x-arouter-pool"), "ondemand");
+    assert_eq!(hstr(&resp, "x-arouter-cross-pool"), "");
+}
+
+#[tokio::test]
+async fn group_fallback_waits_until_no_eligible_candidate_at_requested_grade() {
+    let failing = bad_500().await;
+    let (fallback, fallback_hits) = counting_good().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![
+        model("zai/glm", "A", &["quota"], &failing, 1.0, (0.0, 0.0)),
+        model("or/gpt", "A", &["ondemand"], &fallback, 1.0, (1.0, 4.0)),
+    ];
+    cfg.groups = vec![GroupConfig {
+        id: "arouter-team".into(),
+        pool: None,
+        members: vec!["zai/glm".into()],
+        grades: Default::default(),
+        ladder: vec![],
+        fallback: vec!["ondemand".into()],
+    }];
+    let t = test_app(cfg);
+
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-team-A",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(fallback_hits.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn group_fallback_runs_when_requested_grade_has_no_eligible_member() {
+    let failing_lower_grade = bad_500().await;
+    let fallback = good_json().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![
+        model(
+            "zai/glm",
+            "B",
+            &["quota"],
+            &failing_lower_grade,
+            1.0,
+            (0.0, 0.0),
+        ),
+        model("or/gpt", "A", &["ondemand"], &fallback, 1.0, (1.0, 4.0)),
+    ];
+    cfg.groups = vec![GroupConfig {
+        id: "arouter-team".into(),
+        pool: None,
+        members: vec!["zai/glm".into()],
+        grades: Default::default(),
+        ladder: vec![],
+        fallback: vec!["ondemand".into()],
+    }];
+    let t = test_app(cfg);
+
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "arouter-team-A",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(hstr(&resp, "x-arouter-upstream"), "or/gpt");
+    assert_eq!(hstr(&resp, "x-arouter-cross-pool"), "quota");
 }
 
 #[tokio::test]

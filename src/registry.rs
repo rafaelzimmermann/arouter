@@ -280,7 +280,7 @@ impl Registry {
 
     /// A model's rank on a group's ladder: explicit member rank first,
     /// else its global grade token re-ranked on the group ladder.
-    fn group_rank(&self, g: &Group, idx: usize) -> Option<usize> {
+    pub(crate) fn group_rank(&self, g: &Group, idx: usize) -> Option<usize> {
         if let Some(&(_, r)) = g.members.iter().find(|(i, _)| *i == idx) {
             return Some(r);
         }
@@ -773,6 +773,32 @@ mod tests {
             .map(|m| m.id.as_str())
             .collect();
         assert_eq!(got, vec!["z/super"]);
+    }
+
+    #[test]
+    fn member_group_keeps_same_grade_models_across_pools_together() {
+        let mut cfg = Config::default();
+        cfg.models = vec![
+            m("zai/glm", "A", &["quota"], 1.0, (0.0, 0.0)),
+            m("or/gpt", "A", &["ondemand"], 1.0, (1.0, 4.0)),
+        ];
+        cfg.groups = vec![GroupConfig {
+            id: "arouter-team".into(),
+            pool: None,
+            members: vec!["zai/glm".into(), "or/gpt".into()],
+            grades: BTreeMap::new(),
+            ladder: vec![],
+            fallback: vec![],
+        }];
+        let r = Registry::from_config(&cfg, &ks()).unwrap();
+        let g = r.group("arouter-team").unwrap();
+        let got: Vec<&str> = r
+            .group_attempt_list("default", g, &g.ladder.parse_request("A").unwrap())
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(got, vec!["or/gpt", "zai/glm"]);
+        assert_eq!(r.group_rank(g, 0), Some(g.ladder.rank("A").unwrap()));
     }
 
     #[test]
