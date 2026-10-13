@@ -52,7 +52,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(arouter_requests_total{caller=~\"$caller\"}[5m]))"
+          "expr": "sum(rate(arouter_requests_total{caller=~\"$caller\",event=\"request\"}[5m]))"
         }
       ]
     },
@@ -183,7 +183,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (pool) (rate(arouter_requests_total{caller=~\"$caller\"}[5m]))",
+          "expr": "sum by (pool) (rate(arouter_requests_total{caller=~\"$caller\",event=\"request\"}[5m]))",
           "legendFormat": "{{pool}}"
         }
       ]
@@ -322,6 +322,27 @@
           "unit": "s"
         }
       }
+    },
+    {
+      "type": "timeseries",
+      "title": "HTTP errors/s by source → target",
+      "description": "Client-facing 4xx/5xx responses. source_model is the requested model; target_model is the selected upstream or none when routing exhausted.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 28
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (http_status, source_model, target_model) (rate(arouter_requests_total{caller=~\"$caller\",event=\"request\",http_status=~\"4..|5..\"}[5m]))",
+          "legendFormat": "{{http_status}} {{source_model}} → {{target_model}}"
+        }
+      ]
     }
   ],
   "schemaVersion": 39,

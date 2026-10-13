@@ -873,11 +873,30 @@ async fn handle_chat(
         true
     };
     let build_candidates = |pool: &str| -> (Vec<&Model>, Vec<&Model>) {
-        let pre: Vec<&Model> = reg
-            .attempt_list(profile, pool, &req)
+        let considered = reg.attempt_list(profile, pool, &req);
+        let scope_excluded: Vec<String> = considered
+            .iter()
+            .filter(|m| !scope_ok(m))
+            .map(|m| m.id.clone())
+            .collect();
+        let scoped: Vec<&Model> = considered.into_iter().filter(|m| scope_ok(m)).collect();
+        let considered_count = scope_excluded.len() + scoped.len();
+        let health_excluded: Vec<String> = scoped
+            .iter()
+            .filter(|m| st.health.is_excluded(&m.id))
+            .map(|m| m.id.clone())
+            .collect();
+        let healthy: Vec<&Model> = scoped
             .into_iter()
-            .filter(|m| scope_ok(m))
             .filter(|m| !st.health.is_excluded(&m.id))
+            .collect();
+        let context_excluded: Vec<String> = healthy
+            .iter()
+            .filter(|m| !quota::context_fits(m, &est))
+            .map(|m| m.id.clone())
+            .collect();
+        let pre: Vec<&Model> = healthy
+            .into_iter()
             .filter(|m| quota::context_fits(m, &est))
             .collect();
         // F11: preference resolved ONCE per request — profile overlay
@@ -887,22 +906,50 @@ async fn handle_chat(
             "fastest" => quota::OrderMode::Fastest,
             _ => quota::OrderMode::QuotaPool,
         };
-        let ordered = quota::order_candidates(
+        let ordered_by_policy = quota::order_candidates(
             &qstate,
             &st.health,
             &rt.provider_map,
             mode,
             &est,
             pre.clone(),
-        )
-        .into_iter()
-        .filter(|m| quota::model_available(&qstate, &rt.provider_map, m))
-        .collect();
+        );
+        let quota_excluded: Vec<String> = ordered_by_policy
+            .iter()
+            .filter(|m| pool != "local" && !quota::model_available(&qstate, &rt.provider_map, m))
+            .map(|m| m.id.clone())
+            .collect();
+        let ordered: Vec<&Model> = ordered_by_policy
+            .into_iter()
+            // Local models do not consume provider subscription quota. A
+            // local engine may share its provider prefix with a quota model;
+            // an exhausted subscription window must not block local fallback.
+            .filter(|m| pool == "local" || quota::model_available(&qstate, &rt.provider_map, m))
+            .collect();
         // E8: residency boost (loaded local models float within their
         // grade), then warm-cache stickiness for the local pool.
         let mut ordered = crate::localeng::boost_residency(ordered, &st.local.current());
         if pool == "local" {
             ordered = crate::localeng::boost_sticky(ordered, &st.sticky, &caller.name);
+        }
+        if ordered.is_empty() {
+            let pool_models: Vec<String> = reg
+                .models
+                .iter()
+                .filter(|m| m.pools.iter().any(|p| p == pool))
+                .map(|m| format!("{}@{}", m.id, reg.ladder.token(m.grade_rank)))
+                .collect();
+            tracing::info!(
+                candidate_pool = pool,
+                caller = %caller.name,
+                considered = considered_count,
+                pool_models = ?pool_models,
+                scope_excluded = ?scope_excluded,
+                health_excluded = ?health_excluded,
+                context_excluded = ?context_excluded,
+                quota_excluded = ?quota_excluded,
+                "no eligible candidates in pool"
+            );
         }
         (ordered, pre)
     };
@@ -913,11 +960,30 @@ async fn handle_chat(
     let build_group = |g: &crate::registry::Group,
                        greq: &crate::grades::GradeRequest|
      -> (Vec<&Model>, Vec<&Model>) {
-        let pre: Vec<&Model> = reg
-            .group_attempt_list(profile, g, greq)
+        let considered = reg.group_attempt_list(profile, g, greq);
+        let scope_excluded: Vec<String> = considered
+            .iter()
+            .filter(|m| !scope_ok(m))
+            .map(|m| m.id.clone())
+            .collect();
+        let scoped: Vec<&Model> = considered.into_iter().filter(|m| scope_ok(m)).collect();
+        let considered_count = scope_excluded.len() + scoped.len();
+        let health_excluded: Vec<String> = scoped
+            .iter()
+            .filter(|m| st.health.is_excluded(&m.id))
+            .map(|m| m.id.clone())
+            .collect();
+        let healthy: Vec<&Model> = scoped
             .into_iter()
-            .filter(|m| scope_ok(m))
             .filter(|m| !st.health.is_excluded(&m.id))
+            .collect();
+        let context_excluded: Vec<String> = healthy
+            .iter()
+            .filter(|m| !quota::context_fits(m, &est))
+            .map(|m| m.id.clone())
+            .collect();
+        let pre: Vec<&Model> = healthy
+            .into_iter()
             .filter(|m| quota::context_fits(m, &est))
             .collect();
         let mode = match g.pool.as_deref() {
@@ -928,20 +994,45 @@ async fn handle_chat(
             },
             None => quota::OrderMode::QuotaPool,
         };
-        let ordered = quota::order_candidates(
+        let ordered_by_policy = quota::order_candidates(
             &qstate,
             &st.health,
             &rt.provider_map,
             mode,
             &est,
             pre.clone(),
-        )
-        .into_iter()
-        .filter(|m| quota::model_available(&qstate, &rt.provider_map, m))
-        .collect();
+        );
+        let quota_excluded: Vec<String> = ordered_by_policy
+            .iter()
+            .filter(|m| {
+                g.pool.as_deref() != Some("local")
+                    && !quota::model_available(&qstate, &rt.provider_map, m)
+            })
+            .map(|m| m.id.clone())
+            .collect();
+        let ordered: Vec<&Model> = ordered_by_policy
+            .into_iter()
+            .filter(|m| {
+                g.pool.as_deref() == Some("local")
+                    || quota::model_available(&qstate, &rt.provider_map, m)
+            })
+            .collect();
         let mut ordered = crate::localeng::boost_residency(ordered, &st.local.current());
         if g.pool.as_deref() == Some("local") {
             ordered = crate::localeng::boost_sticky(ordered, &st.sticky, &caller.name);
+        }
+        if ordered.is_empty() {
+            tracing::info!(
+                group = %g.id,
+                candidate_pool = ?g.pool,
+                caller = %caller.name,
+                considered = considered_count,
+                scope_excluded = ?scope_excluded,
+                health_excluded = ?health_excluded,
+                context_excluded = ?context_excluded,
+                quota_excluded = ?quota_excluded,
+                "no eligible candidates in group"
+            );
         }
         (ordered, pre)
     };
@@ -988,15 +1079,33 @@ async fn handle_chat(
             .unwrap_or_else(|| reg.base_fallback.cross_pool.clone())
             .unwrap_or_default(),
     };
+    let fallback_targets = cross.clone();
     for target in cross {
         if target == pool || !crate::config::POOLS.contains(&target.as_str()) {
             continue;
         }
-        let (tcands, _) = build_candidates(&target);
+        let (tcands, tpre) = build_candidates(&target);
         if tcands.is_empty() {
+            tracing::info!(
+                from = pool,
+                to = %target,
+                profile,
+                caller = %caller.name,
+                requested = %raw_model,
+                considered = tpre.len(),
+                "cross-pool fallback has no eligible candidates"
+            );
             continue;
         }
-        tracing::info!(from = pool, to = %target, "cross-pool fallback");
+        tracing::info!(
+            from = pool,
+            to = %target,
+            profile,
+            caller = %caller.name,
+            requested = %raw_model,
+            candidates = ?tcands.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            "cross-pool fallback"
+        );
         match try_candidates(
             &st,
             &rt,
@@ -1020,13 +1129,6 @@ async fn handle_chat(
         }
     }
 
-    st.metrics.record_exhausted(
-        pool,
-        profile,
-        &caller.name,
-        caller.project.as_deref(),
-        &raw_model,
-    );
     // Budget denial outranks generic exhaustion (E4): the caller asked
     // for a chargeable pool and the guard said no.
     if let Some(e) = &final_err {
@@ -1036,6 +1138,13 @@ async fn handle_chat(
             }
         }
     }
+    st.metrics.record_exhausted(
+        pool,
+        profile,
+        &caller.name,
+        caller.project.as_deref(),
+        &raw_model,
+    );
     let retry = quota::nearest_retry_unix(&qstate, &rt.provider_map, &pre)
         .map(|t| t.saturating_sub(quota::unix_now()).max(1))
         .filter(|s| *s > 0);
@@ -1046,6 +1155,16 @@ async fn handle_chat(
     let detail = final_err
         .map(|e| e.last_error)
         .unwrap_or_else(|| "no candidates".into());
+    tracing::warn!(
+        requested = %raw_model,
+        pool,
+        profile,
+        caller = %caller.name,
+        fallback_targets = ?fallback_targets,
+        candidates_before_quota = pre.len(),
+        detail = %detail,
+        "request exhausted"
+    );
     if wire == Wire::Anthropic {
         let mut resp = wire_error(
             wire,
@@ -1240,7 +1359,14 @@ async fn try_candidates(
                     "no response headers within headers_secs",
                     t0.elapsed().as_millis() as u64,
                 );
-                tracing::warn!(model = m.id, "headers deadline exceeded");
+                tracing::warn!(
+                    model = m.id,
+                    requested = %raw_model,
+                    pool,
+                    profile,
+                    caller = %caller.name,
+                    "headers deadline exceeded"
+                );
                 st.health.record_failure(&m.id, true);
                 err.last_error = format!("{}: headers timeout", m.id);
                 err.attempts += 1;
@@ -1285,7 +1411,14 @@ async fn try_candidates(
                                 &msg,
                                 t0.elapsed().as_millis() as u64,
                             );
-                            tracing::warn!(model = m.id, "{msg}");
+                            tracing::warn!(
+                                model = m.id,
+                                requested = %raw_model,
+                                pool,
+                                profile,
+                                caller = %caller.name,
+                                "{msg}"
+                            );
                             st.health.record_failure(&m.id, true);
                             err.last_error = format!("{}: {}", m.id, msg);
                             err.attempts += 1;
@@ -1306,7 +1439,14 @@ async fn try_candidates(
                                 msg,
                                 t0.elapsed().as_millis() as u64,
                             );
-                            tracing::warn!(model = m.id, "{msg}");
+                            tracing::warn!(
+                                model = m.id,
+                                requested = %raw_model,
+                                pool,
+                                profile,
+                                caller = %caller.name,
+                                "{msg}"
+                            );
                             st.health.record_failure(&m.id, true);
                             err.last_error = format!("{}: {}", m.id, msg);
                             err.attempts += 1;
@@ -1422,7 +1562,15 @@ async fn try_candidates(
                     &msg,
                     t0.elapsed().as_millis() as u64,
                 );
-                tracing::warn!(model = m.id, "connect error: {msg}");
+                tracing::warn!(
+                    model = m.id,
+                    requested = %raw_model,
+                    pool,
+                    profile,
+                    caller = %caller.name,
+                    detail = %msg,
+                    "connect error"
+                );
                 st.health.record_failure(&m.id, true);
                 err.last_error = format!("{}: {msg}", m.id);
                 err.attempts += 1;

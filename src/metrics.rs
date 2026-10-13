@@ -20,7 +20,7 @@ pub const N_MODELS: &str = "arouter_models";
 pub const N_LATENCY: &str = "arouter_request_duration_seconds";
 pub const N_TTFB: &str = "arouter_stream_ttfb_seconds";
 
-const H_REQUESTS_TOTAL: &str = "Routed requests and upstream attempts by outcome.";
+const H_REQUESTS_TOTAL: &str = "Routed requests and upstream attempts by outcome; event distinguishes requests from attempts and HTTP status is included when known.";
 const H_TOKENS_TOTAL: &str = "Tokens counted from upstream usage, by direction.";
 const H_COST_TOTAL: &str = "Estimated spend in USD (priced models).";
 const H_DEGRADED_TOTAL: &str = "Requests served at a lower grade than requested.";
@@ -274,7 +274,22 @@ impl Metrics {
                 ("grade_requested", rec.grade_requested.clone()),
                 ("grade_served", rec.grade_served.clone()),
                 ("model", rec.model.clone()),
+                ("source_model", rec.grade_requested.clone()),
+                ("target_model", rec.model.clone()),
                 ("status", rec.status.clone()),
+                (
+                    "event",
+                    if matches!(rec.status.as_str(), "ok" | "aborted") {
+                        "request"
+                    } else {
+                        "attempt"
+                    }
+                    .to_string(),
+                ),
+                (
+                    "http_status",
+                    rec.http_status.map(|s| s.to_string()).unwrap_or_default(),
+                ),
             ],
             1.0,
         );
@@ -362,7 +377,11 @@ impl Metrics {
                 ("caller", caller.to_string()),
                 ("project", project.unwrap_or("").to_string()),
                 ("grade_requested", requested.to_string()),
+                ("source_model", requested.to_string()),
+                ("target_model", "none".to_string()),
                 ("status", "exhausted".to_string()),
+                ("event", "request".to_string()),
+                ("http_status", "429".to_string()),
             ],
             1.0,
         );
@@ -535,7 +554,7 @@ mod tests {
         m.record(&rec("ok"));
         let out = m.render();
         assert!(out.contains(
-            "arouter_requests_total{caller=\"alice\",grade_requested=\"A+\",grade_served=\"A\",model=\"or/gpt-5.2\",pool=\"ondemand\",profile=\"default\",project=\"arouter\",status=\"ok\"} 1"
+            "arouter_requests_total{caller=\"alice\",event=\"request\",grade_requested=\"A+\",grade_served=\"A\",http_status=\"200\",model=\"or/gpt-5.2\",pool=\"ondemand\",profile=\"default\",project=\"arouter\",source_model=\"A+\",status=\"ok\",target_model=\"or/gpt-5.2\"} 1"
         ));
         assert!(out.contains("arouter_tokens_total{caller=\"alice\",direction=\"in\",model=\"or/gpt-5.2\",pool=\"ondemand\",project=\"arouter\"} 1000\n"));
         assert!(out.contains("arouter_tokens_total{caller=\"alice\",direction=\"out\",model=\"or/gpt-5.2\",pool=\"ondemand\",project=\"arouter\"} 3000\n"));
@@ -554,7 +573,7 @@ mod tests {
         m.record_exhausted("quota", "default", "ci", None, "A+");
         let out = m.render();
         assert!(out.contains(
-            "arouter_requests_total{caller=\"ci\",grade_requested=\"A+\",pool=\"quota\",profile=\"default\",status=\"exhausted\"} 1\n"
+            "arouter_requests_total{caller=\"ci\",event=\"request\",grade_requested=\"A+\",http_status=\"429\",pool=\"quota\",profile=\"default\",source_model=\"A+\",status=\"exhausted\",target_model=\"none\"} 1\n"
         ));
         assert!(!out.contains("status=\"exhausted\",model"));
     }

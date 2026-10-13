@@ -65,6 +65,12 @@ arouter monitor          # htop-style TUI: provider LEDs with reset countdowns,
 
 `/metrics` speaks Prometheus (requests, tokens, $ spend, latency/TTFB histograms, quota windows, drain countdown — all labeled by caller/pool/grade). Import [contrib/grafana-dashboard.json](contrib/grafana-dashboard.json), or run the whole stack:
 
+`arouter_requests_total` uses `status` for outcomes (`ok`, `upstream_error`, `exhausted`, …), not HTTP codes. `source_model` is the client request and `target_model` is the upstream model selected (`none` when routing exhausted); `event="request"` excludes individual retry attempts. Filter HTTP errors with `http_status`:
+
+```promql
+sum by (http_status) (rate(arouter_requests_total{event="request",http_status=~"4..|5.."}[5m]))
+```
+
 ```sh
 docker compose -p arouter-obs -f contrib/observability/docker-compose.yml up -d --wait
 #   Grafana http://localhost:3300  ·  Prometheus http://localhost:9090
