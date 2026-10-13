@@ -1859,7 +1859,9 @@ async fn prometheus_metrics_endpoint() {
     );
     let m = body_string(resp).await;
     assert!(m.contains("# TYPE arouter_requests_total counter"));
-    assert!(m.contains("arouter_requests_total{caller=\"alice\",grade_requested=\"A\",grade_served=\"A\",model=\"zai/glm-5.2\",pool=\"quota\",profile=\"default\",project=\"arouter\",status=\"ok\"} 1"));
+    assert!(m.contains(
+        "arouter_requests_total{caller=\"alice\",event=\"request\",grade_requested=\"A\",grade_served=\"A\",http_status=\"200\",model=\"zai/glm-5.2\",pool=\"quota\",profile=\"default\",project=\"arouter\",source_model=\"A\",status=\"ok\",target_model=\"zai/glm-5.2\"} 1"
+    ));
     assert!(m.contains("status=\"exhausted\""));
     assert!(m.contains("arouter_tokens_total{caller=\"alice\",direction=\"in\""));
     assert!(m.contains("arouter_cost_usd_total{caller=\"alice\""));
