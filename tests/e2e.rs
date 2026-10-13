@@ -3632,3 +3632,45 @@ async fn observation_endpoints_follow_auth_require() {
     let resp = get(&t.app, "/healthz", HeaderMap::new()).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn direct_model_selects_only_requested_upstream_and_honors_pool() {
+    let (target, target_hits) = counting_good().await;
+    let (other, other_hits) = counting_good().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![
+        model("codex/target", "A", &["quota"], &target, 1.0, (0.0, 0.0)),
+        model(
+            "other/preferred",
+            "A",
+            &["quota"],
+            &other,
+            100.0,
+            (0.0, 0.0),
+        ),
+    ];
+    let t = test_app(cfg);
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "codex/target",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(hstr(&resp, "x-arouter-upstream"), "codex/target");
+    assert_eq!(target_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(other_hits.load(Ordering::SeqCst), 0);
+    let resp = post_chat(
+        &t.app,
+        "/local/v1/chat/completions",
+        "codex/target",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert!(!resp.status().is_success());
+    assert_eq!(target_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(other_hits.load(Ordering::SeqCst), 0);
+}

@@ -774,6 +774,15 @@ async fn handle_chat(
         }
         found
     };
+    // Exact upstream ids are also accepted as a model selector. This is
+    // useful for callers that explicitly want a provider such as
+    // `codex/gpt-6-astra`; it still goes through the same pool, profile,
+    // quota, health, context, and budget gates as grade/group routing.
+    let direct_model = if group_sel.is_none() {
+        reg.models.iter().find(|m| m.id == raw_model)
+    } else {
+        None
+    };
     let pool_owned;
     let pool: &str = match &group_sel {
         Some((g, _)) => {
@@ -784,6 +793,11 @@ async fn handle_chat(
     };
     let req = match &group_sel {
         Some((_, greq)) => *greq,
+        None if direct_model.is_some() => crate::grades::GradeRequest {
+            ceiling: direct_model.unwrap().grade_rank,
+            floor: Some(direct_model.unwrap().grade_rank),
+            whole_ladder: false,
+        },
         None => match reg.ladder.parse_request(&raw_model) {
             Some(r) => r,
             None => {
@@ -873,7 +887,10 @@ async fn handle_chat(
         true
     };
     let build_candidates = |pool: &str| -> (Vec<&Model>, Vec<&Model>) {
-        let considered = reg.attempt_list(profile, pool, &req);
+        let mut considered = reg.attempt_list(profile, pool, &req);
+        if let Some(target) = direct_model {
+            considered.retain(|m| m.id == target.id);
+        }
         let scope_excluded: Vec<String> = considered
             .iter()
             .filter(|m| !scope_ok(m))
