@@ -1358,6 +1358,73 @@ async fn try_candidates(
                     if let Some(resp) = e.fatal {
                         return Ok(*resp);
                     }
+                    tracing::warn!(
+                        model = m.id,
+                        requested = %raw_model,
+                        pool,
+                        profile,
+                        caller = %caller.name,
+                        detail = %e.last_error,
+                        "Codex attempt failed; trying next candidate"
+                    );
+                    err.last_error = format!("{}: {}", m.id, e.last_error);
+                    err.attempts += 1;
+                    continue;
+                }
+            }
+        }
+        // Native Gemini wire — translate to Google's generateContent
+        // endpoint (x-goog-api-key auth), translate the response back.
+        if m.wire == "gemini" {
+            match gemini_attempt(
+                st, rt, m, caller, profile, pool, raw_model, req, is_stream, payload, est,
+                cross_from, wire, t0, reserve,
+            )
+            .await
+            {
+                Ok(r) => return Ok(r),
+                Err(e) => {
+                    if let Some(resp) = e.fatal {
+                        return Ok(*resp);
+                    }
+                    tracing::warn!(
+                        model = m.id,
+                        requested = %raw_model,
+                        pool,
+                        profile,
+                        caller = %caller.name,
+                        detail = %e.last_error,
+                        "Gemini attempt failed; trying next candidate"
+                    );
+                    err.last_error = format!("{}: {}", m.id, e.last_error);
+                    err.attempts += 1;
+                    continue;
+                }
+            }
+        }
+        // Native Gemini wire — translate to Google's generateContent
+        // endpoint (x-goog-api-key auth), translate the response back.
+        if m.wire == "gemini" {
+            match gemini_attempt(
+                st, rt, m, caller, profile, pool, raw_model, req, is_stream, payload, est,
+                cross_from, wire, t0, reserve,
+            )
+            .await
+            {
+                Ok(r) => return Ok(r),
+                Err(e) => {
+                    if let Some(resp) = e.fatal {
+                        return Ok(*resp);
+                    }
+                    tracing::warn!(
+                        model = m.id,
+                        requested = %raw_model,
+                        pool,
+                        profile,
+                        caller = %caller.name,
+                        detail = %e.last_error,
+                        "Gemini attempt failed; trying next candidate"
+                    );
                     err.last_error = format!("{}: {}", m.id, e.last_error);
                     err.attempts += 1;
                     continue;
@@ -1568,8 +1635,14 @@ async fn try_candidates(
                 if failover(code) {
                     tracing::warn!(
                         model = m.id,
+                        requested = %raw_model,
+                        pool,
+                        profile,
+                        caller = %caller.name,
+                        http_status = code,
+                        detail = %msg,
                         permanent = !retryable(code),
-                        "failing over: {msg}"
+                        "failing over after upstream error"
                     );
                     err.last_error = format!("{}: {msg}", m.id);
                     err.attempts += 1;
@@ -1948,6 +2021,249 @@ async fn codex_attempt(
     let stream = CodexSse::new(
         resp.bytes_stream(),
         crate::codex::SseTranslator::new(&m.upstream_name),
+    );
+    Ok(relay_success(
+        st,
+        rt,
+        m,
+        caller,
+        profile,
+        pool,
+        raw_model,
+        degraded,
+        is_stream,
+        Upstream::Stream(Box::pin(stream)),
+        t0,
+        est,
+        cross_from,
+        wire,
+        reserve,
+    )
+    .await)
+}
+
+struct GeminiFail {
+    last_error: String,
+    /// Boxed: `Response` is large and clippy's `result_large_err`
+    /// fires on fat Err variants returned from hot paths.
+    fatal: Option<Box<Response>>,
+}
+
+/// One attempt against Google's `generateContent` API. Mirrors the openai
+/// attempt path: headers/body deadlines (F5), a budget hold (F2/F3) and
+/// quota windows harvested from real inference responses; retryable
+/// failures fail over. Gemini's key rides `x-goog-api-key`, not a bearer
+/// token, and its model name lives in the URL rather than the body.
+#[allow(clippy::too_many_arguments)]
+async fn gemini_attempt(
+    st: &AppState,
+    rt: &Runtime,
+    m: &Model,
+    caller: &CallerIdentity,
+    profile: &str,
+    pool: &str,
+    raw_model: &str,
+    req: &crate::grades::GradeRequest,
+    is_stream: bool,
+    payload: &serde_json::Value,
+    est: &quota::RequestEstimate,
+    cross_from: Option<&str>,
+    wire: Wire,
+    t0: Instant,
+    reserve: Option<budget::ReserveGuard>,
+) -> Result<Response, GeminiFail> {
+    let fail = |msg: String| GeminiFail {
+        last_error: msg,
+        fatal: None,
+    };
+    let body = crate::gemini::openai_to_gemini(payload, &m.upstream_name).map_err(|e| {
+        // invalid request is the client's fault: no failover, plain 400
+        GeminiFail {
+            last_error: format!("invalid request: {}", e.message),
+            fatal: Some(Box::new(wire_error(
+                wire,
+                e.status,
+                "invalid_request",
+                e.message,
+            ))),
+        }
+    })?;
+    let url = crate::gemini::responses_url(&m.base_url, &m.upstream_name, is_stream);
+    let mut rb = st.http.post(&url).json(&body);
+    if let Some(key) = &m.api_key {
+        // Google's JSON API keys are not bearer tokens
+        rb = rb.header("x-goog-api-key", key);
+    }
+    rb = rb.header(
+        header::ACCEPT,
+        if is_stream {
+            "text/event-stream"
+        } else {
+            "application/json"
+        },
+    );
+    let prefix = m.id.split('/').next().unwrap_or("").to_string();
+    let harvest = rt.quota_harvest.get(&prefix).copied().unwrap_or(true);
+    let resp =
+        match tokio::time::timeout(Duration::from_secs(rt.cfg.timeouts.headers_secs), rb.send())
+            .await
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => return Err(fail(format!("connect error: {e}"))),
+            Err(_) => return Err(fail("headers timeout".into())),
+        };
+    if !resp.status().is_success() {
+        let code = resp.status().as_u16();
+        // E3b: quota headers on failures are ground truth too; a bare 429
+        // without them still pins a synthetic window from Retry-After.
+        let now = unix_now();
+        let windows = quotaeng::harvest(resp.headers());
+        if harvest && !windows.is_empty() {
+            st.quota.apply(&prefix, windows, now);
+        } else if harvest && code == 429 {
+            let ra = resp
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(60);
+            st.quota
+                .apply(&prefix, vec![quotaeng::harvest_429(ra)], now);
+        }
+        let body_text = truncate(&resp.text().await.unwrap_or_default(), 300);
+        let msg = format!("gemini upstream {code}: {body_text}");
+        record_failure(
+            st,
+            rt,
+            m,
+            caller,
+            profile,
+            pool,
+            raw_model,
+            "upstream_error",
+            Some(code),
+            &msg,
+            t0.elapsed().as_millis() as u64,
+        );
+        // a rejected key is a dead upstream: Google answers 400/403 for
+        // "API key not valid", which must fail over like a 503 rather
+        // than end the request
+        let effective = if code == 401 || code == 403 {
+            503
+        } else {
+            code
+        };
+        if retryable(effective) {
+            st.health.record_failure(&m.id, true);
+            return Err(fail(msg));
+        }
+        st.health.record_failure(&m.id, false);
+        return Ok(api_error_with(
+            code,
+            "upstream_error",
+            msg,
+            &[(hdr::UPSTREAM, m.id.clone())],
+        ));
+    }
+    let degraded = m.grade_rank != req.ceiling && !req.whole_ladder;
+    let now = unix_now();
+    if harvest {
+        let w = quotaeng::harvest(resp.headers());
+        if !w.is_empty() {
+            st.quota.apply(&prefix, w, now);
+        }
+    }
+    if !is_stream {
+        // Google's non-streaming form is a plain JSON body; the streaming
+        // form is SSE that a non-streaming caller still needs whole, so
+        // both are buffered here. A stream that ends without a terminal
+        // event is a truncated answer — fail over, never an empty 200.
+        let idle = Duration::from_secs(rt.cfg.timeouts.idle_secs);
+        let bytes = match tokio::time::timeout(idle, resp.bytes()).await {
+            Ok(Ok(b)) => b,
+            Ok(Err(e)) => {
+                let msg = format!("body read failed: {e}");
+                record_failure(
+                    st,
+                    rt,
+                    m,
+                    caller,
+                    profile,
+                    pool,
+                    raw_model,
+                    "upstream_error",
+                    Some(200),
+                    &msg,
+                    t0.elapsed().as_millis() as u64,
+                );
+                st.health.record_failure(&m.id, true);
+                return Err(fail(msg));
+            }
+            Err(_) => {
+                let msg = "gemini body stalled past idle_secs".to_string();
+                record_failure(
+                    st,
+                    rt,
+                    m,
+                    caller,
+                    profile,
+                    pool,
+                    raw_model,
+                    "timeout",
+                    Some(200),
+                    &msg,
+                    t0.elapsed().as_millis() as u64,
+                );
+                st.health.record_failure(&m.id, true);
+                return Err(fail(msg));
+            }
+        };
+        let completion =
+            crate::gemini::parse_buffered_sse(&bytes, &m.upstream_name).map_err(|e| {
+                let msg = e.to_string();
+                record_failure(
+                    st,
+                    rt,
+                    m,
+                    caller,
+                    profile,
+                    pool,
+                    raw_model,
+                    "upstream_error",
+                    Some(200),
+                    &msg,
+                    t0.elapsed().as_millis() as u64,
+                );
+                st.health.record_failure(&m.id, true);
+                fail(msg)
+            })?;
+        st.health.record_success(&m.id);
+        return Ok(relay_success(
+            st,
+            rt,
+            m,
+            caller,
+            profile,
+            pool,
+            raw_model,
+            degraded,
+            is_stream,
+            Upstream::Buffered(
+                "application/json".into(),
+                Bytes::from(completion.to_string()),
+            ),
+            t0,
+            est,
+            cross_from,
+            wire,
+            reserve,
+        )
+        .await);
+    }
+    st.health.record_success(&m.id);
+    let stream = GeminiSse::new(
+        resp.bytes_stream(),
+        crate::gemini::SseTranslator::new(&m.upstream_name),
     );
     Ok(relay_success(
         st,
@@ -2468,7 +2784,6 @@ struct CodexSse<S> {
     tr: crate::codex::SseTranslator,
     out: std::collections::VecDeque<Bytes>,
 }
-
 impl<S> CodexSse<S>
 where
     S: Stream<Item = reqwest::Result<Bytes>> + Unpin,
@@ -2524,7 +2839,72 @@ where
     }
 }
 
-/// Incremental SSE scanner: keeps the last `usage` seen in `data:` payloads.
+/// Native Gemini wire: wraps a Google generateContent-SSE upstream and
+/// re-emits chat-completions-SSE. Same relay shape as CodexSse - the
+/// Gemini translator does the frame translation, and a stream that ends
+/// without a terminal candidate keeps its error (F4), never a silent
+/// empty success.
+struct GeminiSse<S> {
+    inner: S,
+    tr: crate::gemini::SseTranslator,
+    out: std::collections::VecDeque<Bytes>,
+}
+
+impl<S> GeminiSse<S>
+where
+    S: Stream<Item = reqwest::Result<Bytes>> + Unpin,
+{
+    fn new(inner: S, tr: crate::gemini::SseTranslator) -> Self {
+        Self {
+            inner,
+            tr,
+            out: Default::default(),
+        }
+    }
+}
+
+impl<S> Stream for GeminiSse<S>
+where
+    S: Stream<Item = reqwest::Result<Bytes>> + Unpin,
+{
+    type Item = std::io::Result<Bytes>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        loop {
+            if let Some(b) = this.out.pop_front() {
+                return std::task::Poll::Ready(Some(Ok(b)));
+            }
+            match Pin::new(&mut this.inner).poll_next(cx) {
+                std::task::Poll::Ready(Some(Ok(bytes))) => {
+                    this.tr.push_bytes(&bytes);
+                    while let Some(frame) = this.tr.pop_frame() {
+                        this.out.push_back(Bytes::from(frame));
+                    }
+                    continue;
+                }
+                std::task::Poll::Ready(Some(Err(e))) => {
+                    this.out.clear();
+                    return std::task::Poll::Ready(Some(Err(std::io::Error::other(e.to_string()))));
+                }
+                std::task::Poll::Ready(None) => {
+                    return match this.tr.finish() {
+                        Ok(()) => std::task::Poll::Ready(None),
+                        Err(e) => {
+                            this.out.clear();
+                            std::task::Poll::Ready(Some(Err(std::io::Error::other(e))))
+                        }
+                    }
+                }
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct UsageScan {
     buf: Vec<u8>,

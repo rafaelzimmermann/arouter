@@ -24,7 +24,7 @@ pub struct Model {
     /// Blended $/Mtok: (in + 3×out)/4 — typical 1:3 coding mix.
     pub blended_cost: f64,
     /// Upstream wire: `openai` (chat-completions) | `codex` (E7 native
-    /// Codex subscription adapter).
+    /// Codex subscription adapter) | `gemini` (Google's generateContent).
     pub wire: String,
     pub profiles: Vec<String>,
     /// `manual` | `auto` | `catalog` | `heuristic` | `unknown`.
@@ -88,10 +88,16 @@ impl Registry {
                 grade_rank: ladder.rank(&m.grade).expect("validated"),
                 pools: m.pool.clone(),
                 context: m.context,
-                base_url: if m.wire_kind() == "codex" && m.base_url.trim().is_empty() {
-                    crate::codex::DEFAULT_BASE_URL.to_string()
-                } else {
-                    m.base_url.trim_end_matches('/').to_string()
+                base_url: match m.wire_kind() {
+                    // wires with a canonical upstream: an entry may omit
+                    // base_url and get the vendor's API surface
+                    "codex" if m.base_url.trim().is_empty() => {
+                        crate::codex::DEFAULT_BASE_URL.to_string()
+                    }
+                    "gemini" if m.base_url.trim().is_empty() => {
+                        crate::gemini::DEFAULT_BASE_URL.to_string()
+                    }
+                    _ => m.base_url.trim_end_matches('/').to_string(),
                 },
                 api_key: keys.resolve(&m.auth),
                 weight: if m.weight > 0.0 { m.weight } else { 1.0 },
@@ -469,6 +475,29 @@ mod tests {
             .expect("registered");
         assert_eq!(m.wire, "codex");
         assert_eq!(m.base_url, crate::codex::DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn gemini_wire_defaults_base_url_and_propagates() {
+        // a gemini model with no base_url gets Google's JSON API surface;
+        // the wire kind rides through so the proxy picks generateContent
+        let mut cfg = Config::default();
+        cfg.models = vec![ModelConfig {
+            id: "google/gemini-2.5-pro".into(),
+            grade: "A".into(),
+            pool: vec!["quota".into()],
+            wire: Some("gemini".into()),
+            ..ModelConfig::default()
+        }];
+        cfg.validate().unwrap(); // empty base_url is legal for gemini
+        let reg = Registry::from_config(&cfg, &ks()).unwrap();
+        let m = reg
+            .models
+            .iter()
+            .find(|m| m.id == "google/gemini-2.5-pro")
+            .expect("registered");
+        assert_eq!(m.wire, "gemini");
+        assert_eq!(m.base_url, crate::gemini::DEFAULT_BASE_URL);
     }
 
     #[test]

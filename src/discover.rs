@@ -41,6 +41,9 @@ struct UpstreamGroup {
     known: Vec<String>,
     local: bool,
     ollama: bool,
+    /// `wire = "gemini"` seeds list models through Google's `/models`
+    /// shape (and authenticate with `x-goog-api-key`).
+    gemini: bool,
     /// F9: `None` = unrestricted (a seed with no profile limits);
     /// `Some(set)` = union of restricted seeds' profiles.
     profiles: Option<Vec<String>>,
@@ -58,12 +61,19 @@ pub async fn discover(
     // and visibility; URL-only grouping would collapse them.
     let mut groups: BTreeMap<(String, Option<String>), UpstreamGroup> = BTreeMap::new();
     for m in models {
-        let base = m.base_url.trim_end_matches('/').to_string();
+        let base = match m.wire_kind() {
+            // wires with a canonical upstream discover even when the
+            // entry omits base_url (the registry defaults the same way)
+            "gemini" if m.base_url.trim().is_empty() => crate::gemini::DEFAULT_BASE_URL,
+            _ => m.base_url.trim_end_matches('/'),
+        }
+        .to_string();
         if base.is_empty() {
             continue;
         }
         let local = is_local(&base);
         let ollama = base.contains(":11434");
+        let gemini = m.wire_kind() == "gemini";
         let provider = m.id.split('/').next().unwrap_or(&m.id).to_string();
         let key = (base.clone(), m.auth.clone());
         let g = groups.entry(key).or_insert_with(|| UpstreamGroup {
@@ -74,6 +84,7 @@ pub async fn discover(
             known: vec![],
             local,
             ollama,
+            gemini,
             profiles: None,
         });
         g.known.push(m.upstream_name().to_string());
@@ -155,12 +166,21 @@ async fn fetch_names(
     let mut rb = http.get(&url).timeout(Duration::from_secs(10));
     if let Some(spec) = &g.auth {
         if let Some(key) = keys.resolve(&Some(spec.clone())) {
-            rb = rb.bearer_auth(key);
+            rb = if g.gemini {
+                // Google's JSON API keys are not bearer tokens
+                rb.header("x-goog-api-key", key)
+            } else {
+                rb.bearer_auth(key)
+            };
         }
     }
     let resp = rb.send().await?.error_for_status()?;
     let json: serde_json::Value = resp.json().await?;
-    Ok(parse_names(&json, ollama_shape))
+    if g.gemini {
+        Ok(parse_gemini(&json))
+    } else {
+        Ok(parse_names(&json, ollama_shape))
+    }
 }
 
 /// One row of a `/models` listing: (name, context, $/Mtok (in, out)).
@@ -175,6 +195,41 @@ type RawModel = (String, Option<u64>, Option<(f64, f64)>);
 /// `:thinking`, `:extended`) is a plain chat route and is kept.
 fn non_chat_variant(id: &str) -> bool {
     id.ends_with(":batch")
+}
+
+/// Parse Google's `/models` listing: `{"models":[{"name":"models/gemini-2.5-pro",
+///   "supportedGenerationMethods":["generateContent",…],"inputTokenLimit":…}]}`.
+/// Embedding/tuning-only entries cannot serve chat and are skipped; the
+/// `models/` URL prefix is stripped so the id matches the wire's model
+/// name. `inputTokenLimit` is the closest thing to a context window Google
+/// reports (it excludes the output budget) — arouter grades context
+/// conservatively from it.
+fn parse_gemini(json: &serde_json::Value) -> Vec<RawModel> {
+    let mut out = Vec::new();
+    if let Some(arr) = json.get("models").and_then(|v| v.as_array()) {
+        for m in arr {
+            let Some(name) = m.get("name").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let id = name.strip_prefix("models/").unwrap_or(name);
+            // only entries that can actually generate text are candidates
+            let can_generate = m
+                .get("supportedGenerationMethods")
+                .and_then(|v| v.as_array())
+                .map(|methods| {
+                    methods
+                        .iter()
+                        .any(|x| x.as_str().map(|x| x == "generateContent").unwrap_or(false))
+                })
+                .unwrap_or(true);
+            if !can_generate || id.is_empty() {
+                continue;
+            }
+            let ctx = m.get("inputTokenLimit").and_then(|v| v.as_u64());
+            out.push((id.to_string(), ctx, None));
+        }
+    }
+    out
 }
 
 /// Parse `/v1/models` (OpenAI/OpenRouter shape) or `/api/tags` (ollama).
@@ -472,6 +527,33 @@ mod tests {
             vec![("qwen3:14b".into(), None, None)]
         );
         assert!(parse_names(&serde_json::json!({}), false).is_empty());
+    }
+
+    #[test]
+    fn gemini_listing_keeps_only_chat_models() {
+        // Google's /models shape: names carry a models/ prefix, and only
+        // entries offering generateContent can serve a chat request
+        let g = serde_json::json!({
+            "models": [
+                {
+                    "name": "models/gemini-2.5-pro",
+                    "supportedGenerationMethods": ["generateContent", "countTokens"],
+                    "inputTokenLimit": 1048576
+                },
+                {
+                    "name": "models/text-embedding-004",
+                    "supportedGenerationMethods": ["embedContent"]
+                },
+                {"name": "models/bare"}
+            ]
+        });
+        assert_eq!(
+            parse_gemini(&g),
+            vec![
+                ("gemini-2.5-pro".into(), Some(1048576), None),
+                ("bare".into(), None, None),
+            ]
+        );
     }
 
     #[test]

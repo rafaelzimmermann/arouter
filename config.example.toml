@@ -130,11 +130,14 @@ description = "premium models for hard tasks"
 # id: provider/model (model part defaults to the upstream name)
 # pool: quota | local | ondemand — hard boundary, never crossed silently
 # auth: env:NAME | key:LITERAL | none
-# wire: openai (default) | codex — codex routes through the native
+# wire: openai (default) | codex | gemini — codex routes through the native
 #       Codex subscription adapter (E7): no API key and no base_url; the
 #       login is read from the Codex CLI (`codex login`, ~/.codex/auth.json)
 #       per request, and subscription usage limits are learned from the
 #       x-codex-primary/secondary-* response headers.
+#       gemini speaks Google's generateContent JSON API: base_url defaults
+#       to https://generativelanguage.googleapis.com/v1beta and the key
+#       rides x-goog-api-key; thinking tokens count into output spend.
 #
 # Cross-pool fallback is explicit opt-in (routing.md §2). When the quota
 # pool is exhausted, `cross_pool = ["ondemand"]` would pay instead of
@@ -185,6 +188,16 @@ pool      = ["quota"]
 wire      = "codex"
 # base_url is optional (defaults to https://chatgpt.com/backend-api)
 # auth must be absent: the JWT comes from ~/.codex/auth.json
+
+# Native Gemini wire: Google's JSON API, translated both ways through
+# arouter's internal chat-completions currency (tools, images, thinking).
+[[models]]
+id        = "google/gemini-2.5-pro"
+grade     = "A"
+pool      = ["quota"]
+wire      = "gemini"
+auth      = "env:GEMINI_API_KEY"
+# base_url is optional (defaults to the Google JSON API surface)
 
 [[models]]
 id        = "ollama/qwen3:14b"

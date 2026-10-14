@@ -48,6 +48,8 @@ remain the power-user shorthand for the URL's pool. Upstream accounts go in `~/.
 
 For a request that should use one configured upstream directly, send its exact model id (for example `codex/gpt-6-astra`). arouter pins that model and still checks its configured pool, profile visibility, quota, health, context, and budget before sending the request.
 
+For a request that should use one configured upstream directly, send its exact model id (for example `codex/gpt-6-astra`). arouter pins that model and still checks its configured pool, profile visibility, quota, health, context, and budget before sending the request.
+
 **Grades, pools, profiles.** You request `A+`, `A`, `B` — or a range like `"A+..A"` to cap degradation. Pools are hard boundaries: `/v1` = your subscriptions/quotas (default), `/local/v1` = local engines, `/ondemand/v1` = pay-per-token. Profiles add per-task overlays via the URL path (`/night/v1/...`): their own ladder, budgets and model visibility. Falling back from a free pool into a paid one is explicit opt-in (`cross_pool = ["ondemand"]`) and always labeled in the response. (Grade tokens and pool paths remain the power-user surface; groups are what clients see.)
 
 **Quota awareness.** arouter asks its upstreams for quota directly: the documented OpenRouter key endpoint by default, `x-ratelimit-*` headers harvested from the responses it already proxies (a 429 is ground truth — exhausted until its `Retry-After` says otherwise), an opt-in fetcher for z.ai coding plans, and hand-pinned windows for providers with no quota API at all. It then scores each provider: exhausted windows are skipped until their reset (arouter's own 429 carries a reset-aware `Retry-After`), scarce windows and too-fast burn rates are deprioritized, equally-healthy providers spread by remaining headroom. Windows resetting within 4h enter **drain mode** — penalties lift and ties resolve toward the soonest reset, so expiring quota gets spent instead of wasted. Live numbers: `/status.json` and the `arouter_quota_*` gauges.
@@ -199,6 +201,41 @@ Subscription usage limits are learned from the `x-codex-primary-*` /
 `x-codex-secondary-*` response headers and feed the same quota windows
 as every other provider, so exhaustion, failover and cooldowns behave
 identically.
+
+## Native Gemini models
+
+A `wire = "gemini"` entry speaks Google's `generateContent` JSON API
+instead of chat-completions: arouter translates the incoming
+chat-completions payload (system turns, tools, images, `reasoning_effort`)
+into `contents` / `systemInstruction` / `generationConfig`, calls
+`/models/{name}:generateContent` with the key in `x-goog-api-key`, and
+translates Google's response — JSON or SSE — back into chat-completions
+for both client wires. Everything above the adapter is unchanged: grades,
+pools, budgets, quota windows, health, metrics and failover.
+
+For this host's signed-in Antigravity session, use the host-local adapter in
+`contrib/antigravity-bridge/`. It provides the same Google endpoint shape by
+running the official Antigravity CLI in isolated, sandboxed plan mode. This
+adapter supports text chat only; images and function calling are rejected,
+and streaming returns after the CLI finishes its response. Configure its
+local URL and bridge key as shown in that directory's README.
+
+```toml
+[[models]]
+id    = "google/gemini-2.5-pro"
+grade = "A"
+pool  = ["quota"]
+wire  = "gemini"
+auth  = "env:GEMINI_API_KEY"
+# base_url optional → https://generativelanguage.googleapis.com/v1beta
+```
+
+Mapping details worth knowing: `thoughtsTokenCount` counts into
+`completion_tokens` (Google bills thinking as output, so on-demand budgets
+see the real cost) and stays visible as `reasoning_tokens`; a safety block
+is a normal 200 with `finish_reason = content_filter`, not an upstream
+error; and JSON-schema keys Google's `Schema` type rejects (`$schema`,
+`additionalProperties`, …) are stripped from tool declarations.
 
 ## Integration tests
 

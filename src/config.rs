@@ -427,10 +427,13 @@ pub struct ModelConfig {
     /// `heuristic` / `auto`); manual config entries report `manual`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub provenance: String,
-    /// Upstream wire: `openai` (default, chat-completions) or `codex`
+    /// Upstream wire: `openai` (default, chat-completions), `codex`
     /// (E7 native Codex subscription adapter — the model entry points at
     /// the ChatGPT Codex backend and arouter translates both ways; the
-    /// login comes from the Codex CLI, not from an API key).
+    /// login comes from the Codex CLI, not from an API key), or `gemini`
+    /// (Google's `generateContent` JSON API — the entry points at
+    /// `generativelanguage.googleapis.com/v1beta` and the key rides
+    /// `x-goog-api-key`).
     pub wire: Option<String>,
     /// Rationale string for heuristic/auto grades (auditable).
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -465,10 +468,11 @@ impl Default for ModelConfig {
 }
 
 impl ModelConfig {
-    /// Normalized upstream wire: `openai` | `codex`.
+    /// Normalized upstream wire: `openai` | `codex` | `gemini`.
     pub fn wire_kind(&self) -> &str {
         match self.wire.as_deref() {
             Some("codex") => "codex",
+            Some("gemini") => "gemini",
             _ => "openai",
         }
     }
@@ -827,16 +831,16 @@ impl Config {
                 return Err("model id must not be empty".into());
             }
             if let Some(w) = m.wire.as_deref() {
-                if !matches!(w, "openai" | "codex") {
+                if !matches!(w, "openai" | "codex" | "gemini") {
                     return Err(format!(
-                        "model {}: unknown wire {w:?} (openai | codex)",
+                        "model {}: unknown wire {w:?} (openai | codex | gemini)",
                         m.id
                     ));
                 }
             }
-            // codex models default to the ChatGPT Codex backend and read
-            // the login from the Codex CLI — no base_url or API key needed
-            if m.base_url.is_empty() && m.wire_kind() != "codex" {
+            // codex models default to the ChatGPT Codex backend and gemini
+            // models to Google's JSON API — neither needs an explicit base_url
+            if m.base_url.is_empty() && m.wire_kind() != "codex" && m.wire_kind() != "gemini" {
                 return Err(format!("model {}: base_url is required", m.id));
             }
             if ladder.rank(&m.grade).is_none() {

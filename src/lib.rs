@@ -9,6 +9,7 @@ pub mod codex;
 pub mod config;
 pub mod discover;
 pub mod doctor;
+pub mod gemini;
 pub mod glob;
 pub mod grades;
 pub mod health;
