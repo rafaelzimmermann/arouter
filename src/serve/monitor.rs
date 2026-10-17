@@ -106,7 +106,7 @@ pub struct QuotaWindow {
     pub reset_in_secs: Option<i64>,
 }
 
-// E8: local engine residency (see src/localeng.rs)
+// E8: local engine residency (see src/state/localeng.rs)
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct LocalEnginesStatus {
     #[serde(default)]
@@ -470,8 +470,6 @@ pub struct Mon {
     pub hide_unused: bool,
     pub active: bool,
 }
-
-pub const POOL_KEYS: [&str; 3] = ["quota", "local", "ondemand"];
 
 impl Mon {
     pub fn new(url: String) -> Self {

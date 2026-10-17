@@ -16,7 +16,10 @@ use std::{
     collections::BTreeMap,
     fs,
     path::PathBuf,
-    sync::RwLock,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, RwLock,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -126,6 +129,14 @@ pub struct TokenStore {
     /// hash → record
     inner: RwLock<BTreeMap<String, TokenRecord>>,
     path: PathBuf,
+    /// Spend changed since the last durable save. Charges are frequent
+    /// (once per settled stream); serializing + fsyncing the whole file
+    /// on each one is a per-request fsync. The daemon flushes this on a
+    /// timer, and `Drop` flushes once more on shutdown.
+    dirty: AtomicBool,
+    /// Serializes atomic publishes so two flushes cannot race their
+    /// tmp+rename sequence.
+    save_lock: Mutex<()>,
 }
 
 pub fn unix_now() -> u64 {
@@ -175,6 +186,8 @@ impl TokenStore {
         Self {
             inner: RwLock::new(BTreeMap::new()),
             path: PathBuf::new(),
+            dirty: AtomicBool::new(false),
+            save_lock: Mutex::new(()),
         }
     }
 
@@ -212,6 +225,8 @@ impl TokenStore {
         Ok(Self {
             inner: RwLock::new(map),
             path,
+            dirty: AtomicBool::new(false),
+            save_lock: Mutex::new(()),
         })
     }
 
@@ -268,7 +283,7 @@ impl TokenStore {
         };
         let listed = listed_of(&rec);
         self.inner.write().unwrap().insert(rec.hash.clone(), rec);
-        self.save();
+        self.save_now();
         Ok((listed, plaintext))
     }
 
@@ -285,7 +300,7 @@ impl TokenStore {
             }
         };
         if revoked {
-            self.save(); // guard dropped: save takes a read lock
+            self.save_now(); // guard dropped: save takes a read lock
         }
         true
     }
@@ -315,7 +330,26 @@ impl TokenStore {
             }
         };
         if charged {
-            self.save(); // guard dropped: save takes a read lock
+            // Debounced: a stream finish must not fsync the whole store.
+            // The daemon's timer (or Drop) publishes the new spend.
+            self.dirty.store(true, Ordering::Release);
+        }
+    }
+
+    /// Publish pending spend changes if any. Called periodically by the
+    /// daemon and once from `Drop`. Cheap when nothing changed.
+    pub fn flush(&self) {
+        if self.dirty.swap(false, Ordering::AcqRel) && !self.save() {
+            self.dirty.store(true, Ordering::Release);
+        }
+    }
+
+    /// Immediate durable publish for structural changes (create/revoke)
+    /// where losing the write would lose a credential.
+    fn save_now(&self) {
+        self.dirty.store(false, Ordering::Release);
+        if !self.save() {
+            self.dirty.store(true, Ordering::Release);
         }
     }
 
@@ -324,11 +358,14 @@ impl TokenStore {
         self.inner.read().unwrap().values().map(listed_of).collect()
     }
 
-    /// Atomic publish: tmp + fsync + rename (0600).
-    fn save(&self) {
+    /// Atomic publish: tmp + fsync + rename (0600). Returns whether the
+    /// publish succeeded; a failed write leaves the store dirty so the
+    /// next flush retries.
+    fn save(&self) -> bool {
         if self.path.as_os_str().is_empty() {
-            return; // in-memory store
+            return true; // in-memory store
         }
+        let _publish = self.save_lock.lock().unwrap();
         let file = File {
             token: self.inner.read().unwrap().values().cloned().collect(),
         };
@@ -336,7 +373,7 @@ impl TokenStore {
             Ok(t) => t,
             Err(e) => {
                 tracing::error!(error = %e, "tokens.toml serialize failed");
-                return;
+                return false;
             }
         };
         let tmp = self.path.with_extension("toml.tmp");
@@ -359,8 +396,21 @@ impl TokenStore {
             drop(f);
             fs::rename(&tmp, &self.path)
         };
-        if let Err(e) = write() {
-            tracing::error!(path = %self.path.display(), error = %e, "tokens.toml write failed");
+        match write() {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::error!(path = %self.path.display(), error = %e, "tokens.toml write failed");
+                false
+            }
+        }
+    }
+}
+
+impl Drop for TokenStore {
+    /// Last-chance publish of debounced spend on graceful shutdown.
+    fn drop(&mut self) {
+        if self.dirty.load(Ordering::Acquire) {
+            let _ = self.save();
         }
     }
 }
@@ -499,6 +549,28 @@ mod tests {
             rec.spend_day = "2000-01-01".into();
         }
         assert!(store.authenticate(&p).is_ok());
+    }
+
+    #[test]
+    fn debounced_spend_is_published_by_flush() {
+        let dir = tmpdir();
+        let store = TokenStore::open(dir.to_str().unwrap()).unwrap();
+        store
+            .create(
+                "debounced",
+                Scopes {
+                    daily_budget_usd: Some(1.0),
+                    ..Default::default()
+                },
+                "admin",
+            )
+            .unwrap();
+        store.charge_by_caller(&format!("{CALLER_PREFIX}debounced"), 0.25);
+        store.flush();
+        let reopened = TokenStore::open(dir.to_str().unwrap()).unwrap();
+        let listed = reopened.list();
+        assert_eq!(listed.len(), 1);
+        assert!((listed[0].spent_today_usd - 0.25).abs() < 1e-9);
     }
 
     #[test]

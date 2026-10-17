@@ -1,4 +1,4 @@
-//! Auto-grading: embedded catalog (`src/catalog.toml`) + conservative
+//! Auto-grading: embedded catalog (`src/base/catalog.toml`) + conservative
 //! defaults for unknown models (docs/grading.md). Manual
 //! `[[models]]` grades in config.toml always win; this module only
 //! grades *discovered* models (and powers `arouter models grade`).

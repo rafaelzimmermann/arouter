@@ -7,8 +7,141 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub const POOLS: [&str; 3] = ["quota", "local", "ondemand"];
 pub const RESERVED_PROFILES: [&str; 3] = ["default", "local", "ondemand"];
+
+/// The three serving pools. One canonical list: [`Pool::ALL`] and
+/// [`POOLS`] are derived from this enum, so adding a pool is a
+/// compile-time change rather than a string hunt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Pool {
+    Quota,
+    Local,
+    Ondemand,
+}
+
+impl Pool {
+    pub const ALL: [Pool; 3] = [Pool::Quota, Pool::Local, Pool::Ondemand];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Pool::Quota => "quota",
+            Pool::Local => "local",
+            Pool::Ondemand => "ondemand",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Pool::ALL.into_iter().find(|p| p.as_str() == s)
+    }
+}
+
+impl std::str::FromStr for Pool {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s).ok_or_else(|| format!("unknown pool {s:?} (valid: {POOLS:?})"))
+    }
+}
+
+impl std::fmt::Display for Pool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+pub const POOLS: [&str; 3] = [
+    Pool::Quota.as_str(),
+    Pool::Local.as_str(),
+    Pool::Ondemand.as_str(),
+];
+
+/// Upstream protocol spoken by a model entry (`[[models]].wire`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum WireKind {
+    /// OpenAI chat-completions (the default).
+    #[default]
+    OpenAi,
+    /// ChatGPT Codex Responses backend.
+    Codex,
+    /// Google `generateContent`.
+    Gemini,
+}
+
+impl WireKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            WireKind::OpenAi => "openai",
+            WireKind::Codex => "codex",
+            WireKind::Gemini => "gemini",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "openai" => Some(WireKind::OpenAi),
+            "codex" => Some(WireKind::Codex),
+            "gemini" => Some(WireKind::Gemini),
+            _ => None,
+        }
+    }
+}
+
+impl std::str::FromStr for WireKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s).ok_or_else(|| format!("unknown wire {s:?} (openai | codex | gemini)"))
+    }
+}
+
+impl std::fmt::Display for WireKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Within-grade ordering policy (`pool.<name>.preference` or a profile
+/// override).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Preference {
+    Cheapest,
+    Fastest,
+    Manual,
+}
+
+impl Preference {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Preference::Cheapest => "cheapest",
+            Preference::Fastest => "fastest",
+            Preference::Manual => "manual",
+        }
+    }
+}
+
+impl std::str::FromStr for Preference {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "cheapest" => Ok(Preference::Cheapest),
+            "fastest" => Ok(Preference::Fastest),
+            "manual" => Ok(Preference::Manual),
+            _ => Err(format!(
+                "unknown preference {s:?} (cheapest | fastest | manual)"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for Preference {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 // ────────────────────────── routing groups ──────────────────────────
 
@@ -351,7 +484,7 @@ pub struct QuotaConfig {
     /// (aitop-shaped JSON). Mutually exclusive with native sources per
     /// provider — explicit sources win.
     pub command: Option<String>,
-    /// Registry provider prefix → panel name (as before, now per [quota]).
+    /// Registry provider prefix → panel name (as before, now per `[quota]`).
     pub provider_map: BTreeMap<String, String>,
     /// Manually pinned windows.
     pub manual: Vec<QuotaManualWindow>,
@@ -477,13 +610,13 @@ impl Default for ModelConfig {
 }
 
 impl ModelConfig {
-    /// Normalized upstream wire: `openai` | `codex` | `gemini`.
-    pub fn wire_kind(&self) -> &str {
-        match self.wire.as_deref() {
-            Some("codex") => "codex",
-            Some("gemini") => "gemini",
-            _ => "openai",
-        }
+    /// Normalized upstream wire (unknown values already rejected by
+    /// validation; the default is OpenAI chat-completions).
+    pub fn wire_kind(&self) -> WireKind {
+        self.wire
+            .as_deref()
+            .and_then(WireKind::parse)
+            .unwrap_or_default()
     }
     pub fn upstream_name(&self) -> &str {
         match &self.name {
@@ -710,6 +843,10 @@ impl Config {
             if RESERVED_PROFILES.contains(&name.as_str()) {
                 return Err(format!("profile name {name:?} is reserved"));
             }
+            if let Some(pref) = &_p.preference {
+                pref.parse::<Preference>()
+                    .map_err(|e| format!("profile {name}: preference: {e}"))?;
+            }
             if let Some(v) = &_p.models {
                 if !v.include.is_empty() && !v.exclude.is_empty() {
                     return Err(format!(
@@ -754,9 +891,7 @@ impl Config {
             if !POOLS.contains(&name.as_str()) {
                 return Err(format!("unknown pool {name:?} (valid: {POOLS:?})"));
             }
-            if !pc.preference.is_empty()
-                && !["cheapest", "fastest", "manual"].contains(&pc.preference.as_str())
-            {
+            if !pc.preference.is_empty() && pc.preference.parse::<Preference>().is_err() {
                 return Err(format!(
                     "pool.{name}.preference: unknown {:?}",
                     pc.preference
@@ -840,7 +975,7 @@ impl Config {
                 return Err("model id must not be empty".into());
             }
             if let Some(w) = m.wire.as_deref() {
-                if !matches!(w, "openai" | "codex" | "gemini") {
+                if WireKind::parse(w).is_none() {
                     return Err(format!(
                         "model {}: unknown wire {w:?} (openai | codex | gemini)",
                         m.id
@@ -849,7 +984,8 @@ impl Config {
             }
             // codex models default to the ChatGPT Codex backend and gemini
             // models to Google's JSON API — neither needs an explicit base_url
-            if m.base_url.is_empty() && m.wire_kind() != "codex" && m.wire_kind() != "gemini" {
+            if m.base_url.is_empty() && !matches!(m.wire_kind(), WireKind::Codex | WireKind::Gemini)
+            {
                 return Err(format!("model {}: base_url is required", m.id));
             }
             if ladder.rank(&m.grade).is_none() {

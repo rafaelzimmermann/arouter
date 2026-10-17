@@ -1,6 +1,6 @@
 //! E10c — the web-owned overlay (`state_dir/web.toml`, 0600).
 //!
-//! Field-level merge onto manual config + discovery, per PLAN.md:
+//! Field-level merge onto manual config + discovery, per docs/architecture.md:
 //! - structure/credentials are manual-only — an overlay entry that tries
 //!   to change them on an EXISTING model is rejected (entry skipped,
 //!   error surfaced in `/status.json`);
@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 pub const FILE: &str = "web.toml";
 
-/// Default and maximum lifetime of a quota override (PLAN.md: default
+/// Default and maximum lifetime of a quota override (docs/architecture.md: default
 /// 24h, capped).
 pub const QUOTA_OVERRIDE_DEFAULT_TTL: u64 = 24 * 3600;
 pub const QUOTA_OVERRIDE_MAX_TTL: u64 = 7 * 24 * 3600;

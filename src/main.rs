@@ -232,8 +232,7 @@ async fn serve(
     // allowed to be slower; serving must never be without candidates)
     let reloader = Reloader {
         shared: Arc::new(RwLock::new(Arc::new(
-            proxy::Runtime::build((*cfg).clone(), &keys)
-                .map_err(|e| anyhow::anyhow!("startup: {e}"))?,
+            proxy::Runtime::build((*cfg).clone(), &keys).map_err(|e| e.context("startup"))?,
         ))),
         config_path: config.map(|p| p.to_path_buf()),
         state_dir: std::path::PathBuf::from(&cfg.server.state_dir),
@@ -380,6 +379,20 @@ async fn serve(
         keys: Arc::new(keys.clone()),
     };
 
+    // Token spend is debounced (review §4.3): stream finishes mark the
+    // store dirty; this timer publishes one batched TOML write + fsync.
+    {
+        let tokens = state.tokens.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(5));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                tokens.flush();
+            }
+        });
+    }
+
     // E10c: replay persisted quota overrides (unexpired ones only — a
     // stale override never dominates fresher native data), then keep
     // expiring them in the background.
@@ -438,7 +451,7 @@ async fn serve(
         let per_pool: Vec<&arouter::registry::Model> = registry
             .models
             .iter()
-            .filter(|m| m.pools.iter().any(|p| p == pool))
+            .filter(|m| m.pools.iter().any(|p| p.as_str() == pool))
             .collect();
         if !per_pool.is_empty() {
             let mut grades: Vec<String> = per_pool
@@ -762,7 +775,9 @@ async fn models(
                     let ids: Vec<String> = reg
                         .models
                         .iter()
-                        .filter(|m| m.grade_rank == rank && m.pools.iter().any(|p| p == pool))
+                        .filter(|m| {
+                            m.grade_rank == rank && m.pools.iter().any(|p| p.as_str() == pool)
+                        })
                         .map(|m| {
                             if m.provenance == "manual" {
                                 m.id.clone()

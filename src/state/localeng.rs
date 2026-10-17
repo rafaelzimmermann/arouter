@@ -410,7 +410,7 @@ mod tests {
             upstream_name: upstream.into(),
             grade_rank,
             base_url: base_url.into(),
-            pools: vec!["local".into()],
+            pools: vec![crate::config::Pool::Local],
             ..Model::default()
         }
     }

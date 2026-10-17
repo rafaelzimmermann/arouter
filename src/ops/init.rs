@@ -95,7 +95,7 @@ pub fn group_entries(cfg: &Config) -> Result<BTreeMap<String, Vec<PiModel>>> {
                 id: format!("{}-{}", g.id, tok),
                 name: format!("{}-{}", g.id, tok),
                 context_window: ctx,
-                max_tokens: default_max_tokens(&tok, g.pool.as_deref().unwrap_or("quota")),
+                max_tokens: default_max_tokens(&tok, g.pool.map(|p| p.as_str()).unwrap_or("quota")),
                 reasoning: default_reasoning(&tok),
             });
         }
@@ -202,7 +202,7 @@ fn enrich_live_entries(
                 return (*m).clone();
             }
             let (grade, pool) = split_surface_id(reg, id)
-                .map(|(g, tok)| (tok, g.pool.as_deref().unwrap_or("quota")))
+                .map(|(g, tok)| (tok, g.pool.map(|p| p.as_str()).unwrap_or("quota")))
                 .unwrap_or(("", "quota"));
             PiModel {
                 id: id.clone(),

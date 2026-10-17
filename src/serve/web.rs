@@ -35,9 +35,9 @@ use crate::quota::unix_now;
 use serde::Deserialize;
 
 const COOKIE: &str = "arouter_sid";
-const INDEX_HTML: &str = include_str!("../web/index.html");
-const APP_JS: &str = include_str!("../web/app.js");
-const STYLE_CSS: &str = include_str!("../web/style.css");
+const INDEX_HTML: &str = include_str!("../../web/index.html");
+const APP_JS: &str = include_str!("../../web/app.js");
+const STYLE_CSS: &str = include_str!("../../web/style.css");
 const CSP: &str = "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 #[derive(Debug, Clone)]
@@ -644,7 +644,7 @@ struct ModelStateBody {
 /// rebuild. Shared tail of the models write endpoints.
 fn overlay_write(st: &AppState, overlay: crate::overlay::Overlay) -> Response {
     // dry-run BEFORE saving: a rejected write leaves the previous
-    // snapshot serving (PLAN.md)
+    // snapshot serving (docs/architecture.md)
     let rt = st.runtime();
     let diag = overlay.dry_run(&rt.cfg);
     if !diag.errors.is_empty() {

@@ -5,7 +5,7 @@
 //! it, so a text-only model never receives an image prompt and a
 //! non-reasoning model never receives a reasoning request. Capability
 //! knowledge comes from explicit `[[models]].capabilities` (authoritative),
-//! the curated `src/capabilities.toml` table, and a narrow name heuristic.
+//! the curated `src/base/capabilities.toml` table, and a narrow name heuristic.
 
 use serde::Deserialize;
 
@@ -162,7 +162,7 @@ struct RawEntry {
     capabilities: Vec<String>,
 }
 
-/// Curated capability table (`src/capabilities.toml`), resolved by glob
+/// Curated capability table (`src/base/capabilities.toml`), resolved by glob
 /// against the model id and its last path segment (mirroring catalog
 /// lookup). UNION across entries: a model can match both a vision entry
 /// and a reasoning entry.

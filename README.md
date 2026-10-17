@@ -50,7 +50,7 @@ For a request that should use one configured upstream directly, send its exact m
 
 **Grades, pools, profiles.** You request `A+`, `A`, `B` — or a range like `"A+..A"` to cap degradation. Pools are hard boundaries: `/v1` = your subscriptions/quotas (default), `/local/v1` = local engines, `/ondemand/v1` = pay-per-token. Profiles add per-task overlays via the URL path (`/night/v1/...`): their own ladder, budgets and model visibility. Falling back from a free pool into a paid one is explicit opt-in (`cross_pool = ["ondemand"]`) and always labeled in the response. (Grade tokens and pool paths remain the power-user surface; groups are what clients see.)
 
-**Capability-aware routing.** arouter knows what each model can execute and routes accordingly: a prompt with an image goes only to multimodal models, a `reasoning_effort` only to reasoning models — no hand-built `*-vision` groups needed. Capabilities come from explicit `[[models]].capabilities`, a curated table (`src/capabilities.toml`), and a name heuristic, all unioned. When no candidate supports a required capability, the request fails with a clear `no candidates support required capabilities: …` instead of hitting an upstream that can't run it.
+**Capability-aware routing.** arouter knows what each model can execute and routes accordingly: a prompt with an image goes only to multimodal models, a `reasoning_effort` only to reasoning models — no hand-built `*-vision` groups needed. Capabilities come from explicit `[[models]].capabilities`, a curated table (`src/base/capabilities.toml`), and a name heuristic, all unioned. When no candidate supports a required capability, the request fails with a clear `no candidates support required capabilities: …` instead of hitting an upstream that can't run it.
 
 **Quota awareness.** arouter asks its upstreams for quota directly: the documented OpenRouter key endpoint by default, `x-ratelimit-*` headers harvested from the responses it already proxies (a 429 is ground truth — exhausted until its `Retry-After` says otherwise), an opt-in fetcher for z.ai coding plans, and hand-pinned windows for providers with no quota API at all. It then scores each provider: exhausted windows are skipped until their reset (arouter's own 429 carries a reset-aware `Retry-After`), scarce windows and too-fast burn rates are deprioritized, equally-healthy providers spread by remaining headroom. Windows resetting within 4h enter **drain mode** — their preservation penalties lift and ties resolve toward the soonest reset. Other windows still constrain routing, so an expiring short allowance cannot override a scarce weekly allowance. Exhausted windows become retryable at their actual reset time; stale samples without reset times become unknown rather than blocking forever (active manual overrides remain enforced). Live numbers: `/status.json` and the `arouter_quota_*` gauges.
 
@@ -240,6 +240,13 @@ see the real cost) and stays visible as `reasoning_tokens`; a safety block
 is a normal 200 with `finish_reason = content_filter`, not an upstream
 error; and JSON-schema keys Google's `Schema` type rejects (`$schema`,
 `additionalProperties`, …) are stripped from tool declarations.
+
+## Design docs
+
+- [Architecture](docs/architecture.md) — module layers, runtime snapshot, request lifecycle, callers, metrics.
+- [Routing](docs/routing.md) — candidate filters, grades/fallback, health/quota, preference, budget guards.
+- [Grading and discovery](docs/grading.md) — catalog, heuristic, discovery, provenance.
+- [Profiles](docs/profiles.md) — visibility, preference/fallback overlays, budget precedence.
 
 ## Integration tests
 

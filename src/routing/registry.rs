@@ -3,7 +3,7 @@
 //! Implements docs/routing.md §1–§5 (candidate set, fallback policy,
 //! preference ordering) — quota scoring arrives in E3.
 
-use crate::config::{Config, FallbackConfig, KeyStore, ModelConfig};
+use crate::config::{Config, FallbackConfig, KeyStore, ModelConfig, Pool, Preference, WireKind};
 use crate::glob::glob_any;
 use crate::grades::{GradeRequest, Ladder};
 use std::collections::BTreeMap;
@@ -14,7 +14,7 @@ pub struct Model {
     pub upstream_name: String,
     /// Rank in the ladder (0 = best).
     pub grade_rank: usize,
-    pub pools: Vec<String>,
+    pub pools: Vec<Pool>,
     pub context: Option<u64>,
     pub base_url: String,
     pub api_key: Option<String>,
@@ -25,7 +25,7 @@ pub struct Model {
     pub blended_cost: f64,
     /// Upstream wire: `openai` (chat-completions) | `codex` (E7 native
     /// Codex subscription adapter) | `gemini` (Google's generateContent).
-    pub wire: String,
+    pub wire: WireKind,
     pub profiles: Vec<String>,
     /// `manual` | `auto` | `catalog` | `heuristic` | `unknown`.
     pub provenance: String,
@@ -45,7 +45,7 @@ pub struct ProfileEffective {
     pub include: Vec<String>,
     pub exclude: Vec<String>,
     pub fallback: FallbackConfig,
-    pub preference: Option<String>,
+    pub preference: Option<Preference>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,7 +55,7 @@ pub struct Registry {
     pub profiles: BTreeMap<String, ProfileEffective>,
     pub base_fallback: FallbackConfig,
     /// pool name → preference (`cheapest` | `fastest` | `manual`)
-    pub pool_preference: BTreeMap<String, String>,
+    pub pool_preference: BTreeMap<String, Preference>,
     /// Client-facing routing groups (`[[groups]]`, F13) — the surface
     /// `/v1/models` lists and group requests route through.
     pub groups: Vec<Group>,
@@ -69,13 +69,13 @@ pub struct Group {
     pub id: String,
     pub ladder: Ladder,
     /// Membership form 1: every model in this pool.
-    pub pool: Option<String>,
+    pub pool: Option<Pool>,
     /// Membership form 2: (model index, rank on the group ladder) pairs.
     pub members: Vec<(usize, usize)>,
     /// `grades` overrides (model index → rank), either membership form.
     pub grade_overrides: BTreeMap<usize, usize>,
     /// Pools tried, in order, when the group can't serve.
-    pub fallback: Vec<String>,
+    pub fallback: Vec<Pool>,
 }
 
 impl Registry {
@@ -91,15 +91,15 @@ impl Registry {
                 id: m.id.clone(),
                 upstream_name: m.upstream_name().to_string(),
                 grade_rank: ladder.rank(&m.grade).expect("validated"),
-                pools: m.pool.clone(),
+                pools: m.pool.iter().filter_map(|p| Pool::parse(p)).collect(),
                 context: m.context,
                 base_url: match m.wire_kind() {
                     // wires with a canonical upstream: an entry may omit
                     // base_url and get the vendor's API surface
-                    "codex" if m.base_url.trim().is_empty() => {
+                    WireKind::Codex if m.base_url.trim().is_empty() => {
                         crate::codex::DEFAULT_BASE_URL.to_string()
                     }
-                    "gemini" if m.base_url.trim().is_empty() => {
+                    WireKind::Gemini if m.base_url.trim().is_empty() => {
                         crate::gemini::DEFAULT_BASE_URL.to_string()
                     }
                     _ => m.base_url.trim_end_matches('/').to_string(),
@@ -109,7 +109,7 @@ impl Registry {
                 cost_in: m.cost_in,
                 cost_out: m.cost_out,
                 blended_cost: (m.cost_in + 3.0 * m.cost_out) / 4.0,
-                wire: m.wire_kind().to_string(),
+                wire: m.wire_kind(),
                 profiles: m.profiles.clone(),
                 provenance: if m.provenance.is_empty() {
                     "manual".to_string()
@@ -144,7 +144,7 @@ impl Registry {
                     include: vis.include,
                     exclude: vis.exclude,
                     fallback,
-                    preference: p.preference.clone(),
+                    preference: p.preference.as_deref().and_then(|s| s.parse().ok()),
                 },
             );
         }
@@ -152,13 +152,11 @@ impl Registry {
         let pool_preference = cfg
             .pool
             .iter()
-            .map(|(k, v)| {
-                let pref = match v.preference.as_str() {
-                    "fastest" => "fastest",
-                    "manual" => "manual",
-                    _ => "cheapest-or-manual", // normalized below per pool default
-                };
-                (k.clone(), pref.to_string())
+            .filter_map(|(k, v)| {
+                v.preference
+                    .parse::<Preference>()
+                    .ok()
+                    .map(|p| (k.clone(), p))
             })
             .collect();
 
@@ -197,10 +195,10 @@ impl Registry {
                 Group {
                     id: g.id.clone(),
                     ladder: gladder,
-                    pool: g.pool.clone(),
+                    pool: g.pool.as_deref().and_then(Pool::parse),
                     members,
                     grade_overrides,
-                    fallback: g.fallback.clone(),
+                    fallback: g.fallback.iter().filter_map(|p| Pool::parse(p)).collect(),
                 }
             })
             .collect();
@@ -229,19 +227,16 @@ impl Registry {
 
     /// Preference for (profile, pool): profile override → pool config →
     /// default (`manual` for quota/local, `cheapest` for on-demand).
-    pub fn preference_for(&self, profile: &str, pool: &str) -> &'static str {
-        let explicit = self
-            .profiles
+    pub fn preference_for(&self, profile: &str, pool: &str) -> Preference {
+        self.profiles
             .get(profile)
-            .and_then(|p| p.preference.as_deref())
-            .or_else(|| self.pool_preference.get(pool).map(|s| s.as_str()));
-        match explicit {
-            Some("fastest") => "fastest",
-            Some("cheapest") => "cheapest",
-            Some("manual") => "manual",
-            _ if pool == "ondemand" => "cheapest",
-            _ => "manual",
-        }
+            .and_then(|p| p.preference)
+            .or_else(|| self.pool_preference.get(pool).copied())
+            .unwrap_or(if pool == "ondemand" {
+                Preference::Cheapest
+            } else {
+                Preference::Manual
+            })
     }
 
     fn visible(&self, model: &Model, profile: &str) -> bool {
@@ -266,7 +261,7 @@ impl Registry {
             .iter()
             .filter(|m| {
                 m.grade_rank == rank
-                    && m.pools.iter().any(|p| p == pool)
+                    && m.pools.iter().any(|p| p.as_str() == pool)
                     && self.visible(m, profile)
             })
             .count()
@@ -282,7 +277,7 @@ impl Registry {
     pub fn has_pool(&self, profile: &str, pool: &str) -> bool {
         self.models
             .iter()
-            .any(|m| m.pools.iter().any(|p| p == pool) && self.visible(m, profile))
+            .any(|m| m.pools.iter().any(|p| p.as_str() == pool) && self.visible(m, profile))
     }
 
     /// Group lookup by client-facing id.
@@ -336,7 +331,7 @@ impl Registry {
         self.models
             .iter()
             .enumerate()
-            .filter(|(_, m)| m.pools.iter().any(|p| p == pool) && self.visible(m, profile))
+            .filter(|(_, m)| m.pools.iter().any(|p| p.as_str() == pool) && self.visible(m, profile))
             .filter(|(i, _)| self.group_rank(g, *i).is_some_and(|r| ranks.contains(&r)))
             .map(|(_, m)| m)
             .collect()
@@ -344,8 +339,8 @@ impl Registry {
 
     /// Is the model a member of the group (either membership form)?
     fn in_group(&self, g: &Group, idx: usize) -> bool {
-        match g.pool.as_deref() {
-            Some(p) => self.models[idx].pools.iter().any(|x| x == p),
+        match g.pool {
+            Some(p) => self.models[idx].pools.contains(&p),
             None => g.members.iter().any(|(i, _)| *i == idx),
         }
     }
@@ -366,7 +361,7 @@ impl Registry {
         // `ondemand → cheapest` default. The old lookup only saw pool
         // config and only honored "cheapest", ignoring profile overrides
         // and the on-demand default.
-        let preference = g.pool.as_deref().map(|p| self.preference_for(profile, p));
+        let preference = g.pool.map(|p| self.preference_for(profile, p.as_str()));
         let mut idxs: Vec<usize> = (0..self.models.len())
             .filter(|&i| self.in_group(g, i))
             .filter(|&i| self.visible(&self.models[i], profile))
@@ -377,7 +372,7 @@ impl Registry {
             let rb = self.group_rank(g, b).unwrap_or(usize::MAX);
             ra.cmp(&rb)
                 .then_with(|| match preference {
-                    Some("cheapest") => self.models[a]
+                    Some(Preference::Cheapest) => self.models[a]
                         .blended_cost
                         .partial_cmp(&self.models[b].blended_cost)
                         .unwrap_or(std::cmp::Ordering::Equal),
@@ -397,8 +392,8 @@ impl Registry {
     /// Does the group have any model visible to the profile? Drives the
     /// `/v1/models` group listing.
     pub fn group_has_models(&self, profile: &str, g: &Group) -> bool {
-        match g.pool.as_deref() {
-            Some(p) => self.has_pool(profile, p),
+        match g.pool {
+            Some(p) => self.has_pool(profile, p.as_str()),
             None => (0..self.models.len())
                 .any(|i| self.in_group(g, i) && self.visible(&self.models[i], profile)),
         }
@@ -439,7 +434,7 @@ impl Registry {
         let mut cands: Vec<&Model> = self
             .models
             .iter()
-            .filter(|m| m.pools.iter().any(|p| p == pool))
+            .filter(|m| m.pools.iter().any(|p| p.as_str() == pool))
             .filter(|m| ranks.contains(&m.grade_rank))
             .filter(|m| self.visible(m, profile))
             .collect();
@@ -448,7 +443,7 @@ impl Registry {
             a.grade_rank
                 .cmp(&b.grade_rank)
                 .then_with(|| match preference {
-                    "cheapest" => a
+                    Preference::Cheapest => a
                         .blended_cost
                         .partial_cmp(&b.blended_cost)
                         .unwrap_or(std::cmp::Ordering::Equal),
@@ -518,7 +513,7 @@ mod tests {
             .iter()
             .find(|m| m.id == "codex/gpt-6-astra")
             .expect("registered");
-        assert_eq!(m.wire, "codex");
+        assert_eq!(m.wire, WireKind::Codex);
         assert_eq!(m.base_url, crate::codex::DEFAULT_BASE_URL);
     }
 
@@ -541,7 +536,7 @@ mod tests {
             .iter()
             .find(|m| m.id == "google/gemini-2.5-pro")
             .expect("registered");
-        assert_eq!(m.wire, "gemini");
+        assert_eq!(m.wire, WireKind::Gemini);
         assert_eq!(m.base_url, crate::gemini::DEFAULT_BASE_URL);
     }
 
@@ -822,8 +817,8 @@ mod tests {
             vec!["arouter-subscription", "arouter-local", "arouter-ondemand"]
         );
         let sub = r.group("arouter-subscription").unwrap();
-        assert_eq!(sub.pool.as_deref(), Some("quota"));
-        assert_eq!(sub.fallback, vec!["local".to_string()]);
+        assert_eq!(sub.pool.map(|p| p.as_str()), Some("quota"));
+        assert_eq!(sub.fallback, vec![Pool::Local]);
         assert!(r.group("arouter-local").unwrap().fallback.is_empty());
         // pool form: every model of the pool, visibility respected
         let got: Vec<&str> = r

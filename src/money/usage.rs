@@ -159,6 +159,10 @@ const RETENTION_SECS: u64 = 32 * 86_400;
 
 pub struct UsageLog {
     inner: Mutex<Inner>,
+    /// Serializes JSONL appends without holding the state lock across
+    /// file I/O (review §4.4): snapshots/budget queries never wait on a
+    /// disk write, and each record is written as one line.
+    file_lock: Mutex<()>,
 }
 
 impl UsageLog {
@@ -182,6 +186,7 @@ impl UsageLog {
         }
         let ring = load_ring(&path);
         Ok(Self {
+            file_lock: Mutex::new(()),
             inner: Mutex::new(Inner {
                 file,
                 sink_degraded: false,
@@ -200,6 +205,7 @@ impl UsageLog {
     /// Memory-only log (tests, dry runs).
     pub fn in_memory() -> Self {
         Self {
+            file_lock: Mutex::new(()),
             inner: Mutex::new(Inner {
                 file: None,
                 path: None,
@@ -216,45 +222,55 @@ impl UsageLog {
     }
 
     pub fn record(&self, rec: UsageRecord) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.total += 1;
-        // budget ring: append + prune (ring is time-ordered)
-        inner.ring.push_back(rec.clone());
-        let cutoff = rec.ts_unix.saturating_sub(RETENTION_SECS);
-        while inner.ring.front().is_some_and(|r| r.ts_unix < cutoff) {
-            inner.ring.pop_front();
-        }
-        let entry = inner.stats.entry(rec.model.clone()).or_default();
-        entry.requests += 1;
-        entry.last_ts_unix = Some(rec.ts_unix);
-        if rec.status == "ok" {
-            entry.ok += 1;
-            entry.tokens_in += rec.tokens_in.unwrap_or(0);
-            entry.tokens_out += rec.tokens_out.unwrap_or(0);
-            entry.cost_usd += rec.cost_usd;
-        } else {
-            entry.failed += 1;
-            entry.last_error = Some(format!("{} (http {:?})", rec.status, rec.http_status));
-        }
-        let ckey = match &rec.project {
-            Some(p) if !p.is_empty() => format!("{}/{}", rec.caller, p),
-            _ => rec.caller.clone(),
+        let line = serde_json::to_string(&rec).unwrap_or_default();
+        // Clone the append handle under the state lock, then do the I/O
+        // after releasing it. `file_lock` keeps whole lines ordered.
+        let file = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.total += 1;
+            // budget ring: append + prune (ring is time-ordered)
+            inner.ring.push_back(rec.clone());
+            let cutoff = rec.ts_unix.saturating_sub(RETENTION_SECS);
+            while inner.ring.front().is_some_and(|r| r.ts_unix < cutoff) {
+                inner.ring.pop_front();
+            }
+            let entry = inner.stats.entry(rec.model.clone()).or_default();
+            entry.requests += 1;
+            entry.last_ts_unix = Some(rec.ts_unix);
+            if rec.status == "ok" {
+                entry.ok += 1;
+                entry.tokens_in += rec.tokens_in.unwrap_or(0);
+                entry.tokens_out += rec.tokens_out.unwrap_or(0);
+                entry.cost_usd += rec.cost_usd;
+            } else {
+                entry.failed += 1;
+                entry.last_error = Some(format!("{} (http {:?})", rec.status, rec.http_status));
+            }
+            let ckey = match &rec.project {
+                Some(p) if !p.is_empty() => format!("{}/{}", rec.caller, p),
+                _ => rec.caller.clone(),
+            };
+            let c = inner.callers.entry(ckey).or_default();
+            c.requests += 1;
+            c.last_ts_unix = Some(rec.ts_unix);
+            if rec.status == "ok" {
+                c.ok += 1;
+                c.tokens_in += rec.tokens_in.unwrap_or(0);
+                c.tokens_out += rec.tokens_out.unwrap_or(0);
+                c.cost_usd += rec.cost_usd;
+            } else {
+                c.failed += 1;
+            }
+            inner.file.as_ref().and_then(|f| f.try_clone().ok())
         };
-        let c = inner.callers.entry(ckey).or_default();
-        c.requests += 1;
-        c.last_ts_unix = Some(rec.ts_unix);
-        if rec.status == "ok" {
-            c.ok += 1;
-            c.tokens_in += rec.tokens_in.unwrap_or(0);
-            c.tokens_out += rec.tokens_out.unwrap_or(0);
-            c.cost_usd += rec.cost_usd;
-        } else {
-            c.failed += 1;
-        }
-        if let Some(f) = &mut inner.file {
-            let line = serde_json::to_string(&rec).unwrap_or_default();
-            if writeln!(f, "{line}").is_err() {
+        if let Some(mut f) = file {
+            let _append = self.file_lock.lock().unwrap();
+            let write = f
+                .write_all(line.as_bytes())
+                .and_then(|()| f.write_all(b"\n"));
+            if write.is_err() {
                 // don't spam; switch to memory-only — but say so once
+                let mut inner = self.inner.lock().unwrap();
                 tracing::error!(
                     "usage log write failed — switching to memory-only                      (budgets keep working, the JSONL audit trail stops)"
                 );

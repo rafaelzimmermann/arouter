@@ -6,7 +6,7 @@
 //! (grades.auto.toml → catalog → heuristic).
 
 use crate::catalog::{AutoGrade, Catalog, HeuristicInput};
-use crate::config::{AutoGrades, Config, KeyStore, ModelConfig};
+use crate::config::{AutoGrades, Config, KeyStore, ModelConfig, WireKind};
 use crate::grades::Ladder;
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -64,7 +64,7 @@ pub async fn discover(
         let base = match m.wire_kind() {
             // wires with a canonical upstream discover even when the
             // entry omits base_url (the registry defaults the same way)
-            "gemini" if m.base_url.trim().is_empty() => crate::gemini::DEFAULT_BASE_URL,
+            WireKind::Gemini if m.base_url.trim().is_empty() => crate::gemini::DEFAULT_BASE_URL,
             _ => m.base_url.trim_end_matches('/'),
         }
         .to_string();
@@ -73,7 +73,7 @@ pub async fn discover(
         }
         let local = is_local(&base);
         let ollama = base.contains(":11434");
-        let gemini = m.wire_kind() == "gemini";
+        let gemini = m.wire_kind() == WireKind::Gemini;
         let provider = m.id.split('/').next().unwrap_or(&m.id).to_string();
         let key = (base.clone(), m.auth.clone());
         let g = groups.entry(key).or_insert_with(|| UpstreamGroup {

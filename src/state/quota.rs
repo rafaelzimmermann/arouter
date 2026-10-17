@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-// ───────────────────────── thresholds (routing.md §3) ─────────────────────────
+// ───────────────────────── thresholds (docs/routing.md §3) ─────────────────────────
 
 /// Window is "scarce" above this pct.
 pub const SCARCE_PCT: f64 = 80.0;
@@ -503,7 +503,7 @@ impl QuotaWatcher {
         entry.stale = false;
         entry.updated_unix = Some(now);
         // a fresh native sample legitimately supersedes a manual
-        // override (PLAN.md: a stale override never dominates fresh
+        // override (docs/architecture.md: a stale override never dominates fresh
         // native data)
         entry.manual_until = None;
         qs.fetched_unix = Some(qs.fetched_unix.map_or(now, |t| t.max(now)));
@@ -536,7 +536,7 @@ impl QuotaWatcher {
     }
 
     /// E10c: merge a manual quota override as a synthetic `manual`
-    /// sample (PLAN.md). Like [`apply`](Self::apply) but the windows
+    /// sample (docs/architecture.md). Like [`apply`](Self::apply) but the windows
     /// are held only until `expires_at`; `updated_unix` records
     /// `set_at` so a snapshot fetched between `set_at` and now does
     /// not erase the override, while anything genuinely newer does.
@@ -704,7 +704,7 @@ pub fn estimate_request(payload: &serde_json::Value) -> RequestEstimate {
     }
 }
 
-/// Context-window filter (routing.md §1): models whose declared context
+/// Context-window filter (docs/routing.md §1): models whose declared context
 /// cannot fit the estimate are skipped. Unknown context = never filtered.
 pub fn context_fits(m: &Model, est: &RequestEstimate) -> bool {
     let Some(ctx) = m.context else {
@@ -1118,7 +1118,7 @@ mod tests {
         };
         let models = vec![
             Model {
-                wire: "openai".into(),
+                wire: crate::config::WireKind::OpenAi,
                 id: "slow/m".into(),
                 grade_rank: 1,
                 ..Default::default()
@@ -1145,7 +1145,7 @@ mod tests {
         };
         let models = vec![
             Model {
-                wire: "openai".into(),
+                wire: crate::config::WireKind::OpenAi,
                 id: "a/m".into(),
                 grade_rank: 1,
                 ..Default::default()
@@ -1235,12 +1235,12 @@ mod tests {
             max_tokens: None,
         };
         let primary = Model {
-            wire: "openai".into(),
+            wire: crate::config::WireKind::OpenAi,
             weight: 2.0,
             ..model_stub_with_id("zai/primary")
         };
         let backup = Model {
-            wire: "openai".into(),
+            wire: crate::config::WireKind::OpenAi,
             weight: 1.0,
             ..model_stub_with_id("zai/backup")
         };
@@ -1273,10 +1273,10 @@ mod tests {
             panel(&[(30.0, Some(now + DRAIN_SECS + 20 * 3600))], None),
         );
         let m = |id: &str| Model {
-            wire: "openai".into(),
+            wire: crate::config::WireKind::OpenAi,
             id: id.into(),
             grade_rank: 1,
-            pools: vec!["quota".into()],
+            pools: vec![crate::config::Pool::Quota],
             base_url: "http://x".into(),
             api_key: None,
             weight: 1.0,
@@ -1326,14 +1326,14 @@ mod tests {
             max_tokens: None,
         };
         let a_model = Model {
-            wire: "openai".into(),
+            wire: crate::config::WireKind::OpenAi,
             grade_rank: 0, // A (ladder A+ first? ranks are 0-based best)
             cost_in: 5.0,
             cost_out: 25.0,
             ..model_stub_with_id("or/expensive-a")
         };
         let b_model = Model {
-            wire: "openai".into(),
+            wire: crate::config::WireKind::OpenAi,
             grade_rank: 1,
             cost_in: 0.01,
             cost_out: 0.02,
@@ -1361,10 +1361,10 @@ mod tests {
             max_tokens: None,
         };
         let m = |id: &str, cin: f64, cout: f64| Model {
-            wire: "openai".into(),
+            wire: crate::config::WireKind::OpenAi,
             id: id.into(),
             grade_rank: 1,
-            pools: vec!["ondemand".into()],
+            pools: vec![crate::config::Pool::Ondemand],
             base_url: "http://x".into(),
             api_key: None,
             weight: 1.0,
@@ -1407,7 +1407,7 @@ mod tests {
         let m = |id: &str, rank: usize| Model {
             id: id.into(),
             grade_rank: rank,
-            pools: vec!["quota".into()],
+            pools: vec![crate::config::Pool::Quota],
             base_url: "http://x".into(),
             api_key: None,
             weight: 1.0,
@@ -1419,7 +1419,7 @@ mod tests {
             profiles: vec![],
             provenance: "manual".into(),
             role_map: Default::default(),
-            wire: "openai".into(),
+            wire: crate::config::WireKind::OpenAi,
             capabilities: Default::default(),
         };
         let slow = m("x/slow", 1);
@@ -1456,19 +1456,19 @@ mod tests {
         assert!((est.est_out - 4096.0).abs() < 1e-9, "min(100k,8192)×0.5");
 
         let small = Model {
-            wire: "openai".into(),
+            wire: crate::config::WireKind::OpenAi,
             context: Some(8192),
             ..model_stub()
         };
         assert!(!context_fits(&small, &est), "100k max_tokens > 8k ctx");
         let big = Model {
-            wire: "openai".into(),
+            wire: crate::config::WireKind::OpenAi,
             context: Some(200_000),
             ..model_stub()
         };
         assert!(context_fits(&big, &est));
         let unknown = Model {
-            wire: "openai".into(),
+            wire: crate::config::WireKind::OpenAi,
             context: None,
             ..model_stub()
         };
@@ -1483,8 +1483,8 @@ mod tests {
         Model {
             id: id.into(),
             grade_rank: 1,
-            wire: "openai".into(),
-            pools: vec!["quota".into()],
+            wire: crate::config::WireKind::OpenAi,
+            pools: vec![crate::config::Pool::Quota],
             base_url: "http://x".into(),
             api_key: None,
             weight: 1.0,

@@ -45,7 +45,7 @@ fn hour_start(now: u64) -> u64 {
 }
 
 /// Preflight a candidate against every stacked budget layer
-/// (routing.md §6). `est_usd` is the request estimate for *this* model;
+/// (docs/routing.md §6). `est_usd` is the request estimate for *this* model;
 /// a per-request denial tells the caller to try cheaper candidates,
 /// window denials are the pool/profile/caller being out of money.
 pub fn preflight(
