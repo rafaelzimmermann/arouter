@@ -487,7 +487,18 @@ impl QuotaWatcher {
                 windows: vec![],
                 updated_unix: None,
             });
+        // The native OpenRouter key endpoint reports key limits, not the
+        // account wallet. Keep a wallet-credit 402 latch until an inference
+        // succeeds; otherwise each quota poll would erase the only signal.
+        let wallet_block = entry
+            .windows
+            .iter()
+            .find(|w| w.label == "openrouter_wallet" && w.reset_unix.is_some_and(|t| t > now))
+            .cloned();
         entry.windows = windows;
+        if let Some(block) = wallet_block {
+            entry.windows.push(block);
+        }
         entry.error = None;
         entry.stale = false;
         entry.updated_unix = Some(now);
@@ -496,6 +507,31 @@ impl QuotaWatcher {
         // native data)
         entry.manual_until = None;
         qs.fetched_unix = Some(qs.fetched_unix.map_or(now, |t| t.max(now)));
+        self.set(qs);
+    }
+
+    /// Record an OpenRouter account-credit failure. The short cooldown
+    /// suppresses repeated paid attempts while allowing a later recovery probe.
+    pub fn block_openrouter_wallet(&self, provider: &str, now: u64, cooldown_secs: u64) {
+        self.apply(
+            provider,
+            vec![QuotaWindow {
+                label: "openrouter_wallet".into(),
+                pct: 100.0,
+                reset_unix: Some(now.saturating_add(cooldown_secs)),
+                pace: None,
+            }],
+            now,
+        );
+    }
+
+    pub fn clear_openrouter_wallet(&self, provider: &str, now: u64) {
+        let current = self.current();
+        let mut qs = QuotaState::clone(&current);
+        if let Some(entry) = qs.providers.get_mut(provider) {
+            entry.windows.retain(|w| w.label != "openrouter_wallet");
+            entry.updated_unix = Some(now);
+        }
         self.set(qs);
     }
 
@@ -1165,6 +1201,17 @@ mod tests {
         // explicit wins even when wrong
         map.explicit.insert("codex".into(), "missing".into());
         assert!(map.resolve("codex", &qs.providers).is_none());
+    }
+
+    #[test]
+    fn wallet_credit_block_uses_explicit_quota_panel_mapping() {
+        let now = unix_now();
+        let watcher = QuotaWatcher::default();
+        watcher.block_openrouter_wallet("openrouter", now, 300);
+        let mut map = ProviderMap::default();
+        map.explicit.insert("or".into(), "openrouter".into());
+        let model = model_stub_with_id("or/deepseek/model");
+        assert!(!model_available(&watcher.current(), &map, &model));
     }
 
     #[test]

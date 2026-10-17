@@ -1228,6 +1228,11 @@ async fn try_candidates(
         // review F5: bound candidates per request (documented top-3)
         .take(rt.cfg.timeouts.max_attempts.max(1))
     {
+        // Quota can change while this precomputed candidate list is being
+        // walked (for example after an upstream wallet-credit 402).
+        if !quota::model_available(&st.quota.current(), &rt.provider_map, m) {
+            continue;
+        }
         // F13: per-candidate serving pool — mixed-pool member-form groups
         // need each member's own pool for the budget guards, headers and
         // labels below. Identical to the request pool everywhere else.
@@ -1347,41 +1352,18 @@ async fn try_candidates(
                 }
             }
         }
-        // Native Gemini wire — translate to Google's generateContent
-        // endpoint (x-goog-api-key auth), translate the response back.
-        if m.wire == "gemini" {
-            match gemini_attempt(
-                st, rt, m, caller, profile, pool, raw_model, req, is_stream, payload, est,
-                cross_from, wire, t0, reserve,
-            )
-            .await
-            {
-                Ok(r) => return Ok(r),
-                Err(e) => {
-                    if let Some(resp) = e.fatal {
-                        return Ok(*resp);
-                    }
-                    tracing::warn!(
-                        model = m.id,
-                        requested = %raw_model,
-                        pool,
-                        profile,
-                        caller = %caller.name,
-                        detail = %e.last_error,
-                        "Gemini attempt failed; trying next candidate"
-                    );
-                    err.last_error = format!("{}: {}", m.id, e.last_error);
-                    err.attempts += 1;
-                    continue;
-                }
-            }
-        }
         let url = format!("{}/chat/completions", m.base_url);
         let mut rb = st.http.post(&url).json(&payload);
         if let Some(key) = &m.api_key {
             rb = rb.bearer_auth(key);
         }
         let prefix = m.id.split('/').next().unwrap_or("").to_string();
+        let quota_provider = rt
+            .provider_map
+            .explicit
+            .get(&prefix)
+            .cloned()
+            .unwrap_or_else(|| prefix.clone());
         let harvest = rt.quota_harvest.get(&prefix).copied().unwrap_or(true);
         // review F5: headers deadline — a connected upstream that never
         // answers fails over instead of hanging the request
@@ -1422,6 +1404,10 @@ async fn try_candidates(
         };
         match resp {
             Ok(resp) if resp.status().is_success() => {
+                if prefix == "or" {
+                    st.quota
+                        .clear_openrouter_wallet(&quota_provider, unix_now());
+                }
                 let degraded = rt.registry.grade_for_request(raw_model, m).1 != req.ceiling
                     && !req.whole_ladder;
                 if harvest {
@@ -1562,8 +1548,32 @@ async fn try_candidates(
                         st.quota.apply(&prefix, w, unix_now());
                     }
                 }
-                let body_text = truncate(&resp.text().await.unwrap_or_default(), 300);
+                let body = resp.text().await.unwrap_or_default();
+                let wallet_credit_error = code == 402 && is_openrouter_wallet_credit_error(&body);
+                let body_text = truncate(&body, 300);
                 let msg = format!("upstream {code}: {body_text}");
+                if wallet_credit_error {
+                    st.quota
+                        .block_openrouter_wallet(&quota_provider, unix_now(), 300);
+                    record_failure(
+                        st,
+                        rt,
+                        m,
+                        caller,
+                        profile,
+                        pool,
+                        raw_model,
+                        "upstream_error",
+                        Some(code),
+                        &msg,
+                        t0.elapsed().as_millis() as u64,
+                    );
+                    st.health.record_failure(&m.id, false);
+                    tracing::warn!(model = m.id, provider = %prefix, "OpenRouter account credits exhausted; suppressing provider for 300s");
+                    err.last_error = format!("{}: {msg}", m.id);
+                    err.attempts += 1;
+                    continue;
+                }
                 record_failure(
                     st,
                     rt,
@@ -1668,6 +1678,17 @@ fn budget_error(d: &budget::Denial, profile: &str, requested: &str, wire: Wire) 
         }
     });
     (StatusCode::PAYMENT_REQUIRED, Json(body)).into_response()
+}
+
+fn is_openrouter_wallet_credit_error(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/error/metadata/limit_source")
+                .and_then(|x| x.as_str())
+                .map(str::to_owned)
+        })
+        .is_some_and(|source| source == "openrouter_credits")
 }
 
 fn retryable(code: u16) -> bool {
@@ -3147,6 +3168,17 @@ mod tests {
         assert!(failover(429));
         assert!(!failover(400));
         assert!(!failover(401));
+    }
+
+    #[test]
+    fn identifies_only_openrouter_wallet_credit_402s() {
+        assert!(is_openrouter_wallet_credit_error(
+            r#"{"error":{"message":"insufficient","code":402,"metadata":{"limit_source":"openrouter_credits"}}}"#
+        ));
+        assert!(!is_openrouter_wallet_credit_error(
+            r#"{"error":{"metadata":{"limit_source":"key_limit"}}}"#
+        ));
+        assert!(!is_openrouter_wallet_credit_error("not json"));
     }
 
     #[test]
