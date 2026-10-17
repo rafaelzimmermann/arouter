@@ -18,7 +18,8 @@ pub const SCARCE_DEPTH: f64 = 0.7;
 /// Drain horizon ("use it or lose it", §7): a window with remaining
 /// quota that resets within this makes its provider a draining target —
 /// the leftover quota is a wasting asset, so routing prefers it (no
-/// scarcity/pace penalties; drain wins availability ties within its
+/// scarcity/pace penalties for that window; other windows still constrain it.
+/// Drain wins availability ties within its
 /// grade, soonest reset first). Supersedes the old "preserve the last
 /// bit before reset" behavior, which just wasted the quota instead.
 pub const DRAIN_SECS: u64 = 4 * 3600;
@@ -27,8 +28,6 @@ pub const PACE_AHEAD_PENALTY: f64 = 0.75;
 /// Snapshot older than this is "unknown" (×0.8, not excluded).
 pub const STALE_AFTER_SECS: u64 = 300;
 pub const STALE_PENALTY: f64 = 0.8;
-/// Exhausted windows are skipped until reset − safety margin.
-pub const RESET_SAFETY_SECS: u64 = 120;
 /// Fairness headroom applies when availability exceeds this (§7).
 pub const FAIRNESS_MIN_AVAIL: f64 = 0.9;
 
@@ -262,7 +261,7 @@ impl QuotaState {
 // ───────────────────────── availability score (§3) ─────────────────────────
 
 /// Per-provider availability in 0..=1 plus, when excluded by an exhausted
-/// window, the unix time it becomes usable again (reset − safety margin).
+/// window, the unix time it becomes usable again (reset).
 #[derive(Debug, Clone)]
 pub struct Availability {
     pub score: f64,
@@ -300,52 +299,62 @@ pub fn provider_availability(
         a.notes.push("panel error".into());
         return a;
     }
-    // exhausted: any window ≥ 100% excludes until nearest reset − safety
-    if let Some(w) = p.windows.iter().find(|w| w.pct >= 100.0) {
-        let retry = p
-            .windows
-            .iter()
-            .filter_map(|w| w.reset_unix)
-            .min()
-            .map(|t| t.saturating_sub(RESET_SAFETY_SECS));
+    // A window describes one quota period. Once it resets its old usage
+    // cannot exclude the provider: header-only sources need another request
+    // to learn the new period. Stale, reset-less samples are unknown too,
+    // unless an explicit manual override is still in force.
+    let manual_active = p.manual_until.is_some_and(|until| until > now);
+    let active: Vec<_> = p
+        .windows
+        .iter()
+        .filter(|w| match w.reset_unix {
+            Some(reset) => reset > now,
+            None => manual_active || !(stale || p.stale),
+        })
+        .collect();
+    let exhausted: Vec<_> = active.iter().copied().filter(|w| w.pct >= 100.0).collect();
+    if let Some(w) = exhausted.first() {
         a.score = 0.0;
-        a.retry_after_unix = retry;
+        // All exhausted windows must recover. Do not promise a retry before
+        // the last blocker resets, or invent one for an unknown reset.
+        a.retry_after_unix = exhausted
+            .iter()
+            .map(|w| w.reset_unix)
+            .collect::<Option<Vec<_>>>()
+            .and_then(|resets| resets.into_iter().max());
         a.notes
             .push(format!("exhausted ({} {:.0}%)", w.label, w.pct));
         return a;
     }
-    // drain ("use it or lose it"): a window with leftover quota resetting
-    // within DRAIN_SECS turns every preservation penalty off — the quota
-    // is about to evaporate, so the only wrong move is not spending it.
-    if let Some(w) = draining(Some(p), now) {
+    let is_draining = |w: &&QuotaWindow| {
+        w.reset_unix
+            .is_some_and(|t| t > now && t - now <= DRAIN_SECS)
+    };
+    for w in active.iter().copied().filter(is_draining) {
         a.notes
             .push(format!("draining ({} {:.0}%)", w.label, w.pct));
-        if stale || p.stale {
-            a.score *= STALE_PENALTY;
-            a.notes.push("stale".into());
-        }
-        a.score = a.score.clamp(0.0, 1.0);
-        return a;
     }
-    // tightest window drives scarcity
-    if let Some(w) = p.windows.iter().max_by(|x, y| x.pct.total_cmp(&y.pct)) {
+    // Drain waives preservation penalties only for that window. A weekly
+    // allowance still needs protection when a five-hour allowance resets.
+    let preserved: Vec<_> = active.iter().copied().filter(|w| !is_draining(w)).collect();
+    if let Some(w) = preserved.iter().max_by(|x, y| x.pct.total_cmp(&y.pct)) {
         if w.pct > SCARCE_PCT {
             let over = (w.pct - SCARCE_PCT) / (100.0 - SCARCE_PCT);
             a.score *= 1.0 - over * SCARCE_DEPTH;
             a.notes.push(format!("scarce ({} {:.0}%)", w.label, w.pct));
         }
     }
-    // pace ahead on any window → burning faster than the window refills
-    if p.windows
+    if preserved
         .iter()
         .any(|w| matches!(w.pace, Some(Pace::Ahead(_))))
     {
         a.score *= PACE_AHEAD_PENALTY;
         a.notes.push("pace ahead".into());
     }
-    if stale || p.stale {
+    if stale || p.stale || active.len() != p.windows.len() {
         a.score *= STALE_PENALTY;
-        a.notes.push("stale".into());
+        a.notes
+            .push("stale or expired quota; retry eligible".into());
     }
     a.score = a.score.clamp(0.0, 1.0);
     a
@@ -378,7 +387,12 @@ pub fn headroom(p: Option<&ProviderState>, now: u64) -> f64 {
     let Some(p) = p else {
         return 0.0;
     };
-    let Some(tightest) = p.windows.iter().max_by(|x, y| x.pct.total_cmp(&y.pct)) else {
+    let Some(tightest) = p
+        .windows
+        .iter()
+        .filter(|w| w.reset_unix.is_none_or(|t| t > now))
+        .max_by(|x, y| x.pct.total_cmp(&y.pct))
+    else {
         return 0.0;
     };
     let hours = match tightest.reset_unix {
@@ -630,14 +644,15 @@ pub struct RequestEstimate {
 }
 
 pub fn estimate_request(payload: &serde_json::Value) -> RequestEstimate {
-    let mut chars: usize = 0;
-    if let Some(msgs) = payload.get("messages").and_then(|m| m.as_array()) {
-        for m in msgs {
-            if let Some(c) = m.get("content").and_then(|c| c.as_str()) {
-                chars += c.len();
-            }
-        }
-    }
+    // Include structured content, tool calls/results, tool schemas, and
+    // output schemas. Looking only at string content silently estimated
+    // entire tool-heavy or content-block conversations as zero tokens.
+    // Serialized byte length / 4 remains an approximation, not tokenization.
+    let chars = ["messages", "tools", "functions", "response_format"]
+        .iter()
+        .filter_map(|key| payload.get(*key))
+        .map(|value| value.to_string().len())
+        .fold(0usize, usize::saturating_add);
     let max_tokens = payload
         .get("max_tokens")
         .and_then(|v| v.as_u64())
@@ -659,7 +674,7 @@ pub fn context_fits(m: &Model, est: &RequestEstimate) -> bool {
     let Some(ctx) = m.context else {
         return true;
     };
-    let need = est.est_in.ceil() as u64 + est.max_tokens.unwrap_or(0);
+    let need = (est.est_in.ceil() as u64).saturating_add(est.max_tokens.unwrap_or(0));
     need <= ctx
 }
 
@@ -690,6 +705,21 @@ pub fn order_candidates<'a>(
     est: &RequestEstimate,
     candidates: Vec<&'a Model>,
 ) -> Vec<&'a Model> {
+    order_candidates_by_rank(quota, health, provider_map, mode, est, candidates, |m| {
+        m.grade_rank
+    })
+}
+
+/// Order using the request's ladder, which may override global model grades.
+pub fn order_candidates_by_rank<'a>(
+    quota: &QuotaState,
+    health: &crate::health::Health,
+    provider_map: &ProviderMap,
+    mode: OrderMode,
+    est: &RequestEstimate,
+    candidates: Vec<&'a Model>,
+    rank: impl Fn(&Model) -> usize,
+) -> Vec<&'a Model> {
     let now = unix_now();
 
     let scored: Vec<_> = candidates
@@ -717,7 +747,7 @@ pub fn order_candidates<'a>(
             health.speed_ema_ms(&s.0.id).unwrap_or(f64::INFINITY)
         };
         out.sort_by(|a, b| {
-            a.0.grade_rank.cmp(&b.0.grade_rank).then_with(|| {
+            rank(a.0).cmp(&rank(b.0)).then_with(|| {
                 speed(a)
                     .partial_cmp(&speed(b))
                     .unwrap_or(std::cmp::Ordering::Equal)
@@ -729,8 +759,8 @@ pub fn order_candidates<'a>(
         // grade is always primary (§4/§5): cheapest-first orders *within*
         // each allowed grade — never silently drops a grade to save money.
         out.sort_by(|a, b| {
-            a.0.grade_rank
-                .cmp(&b.0.grade_rank)
+            rank(a.0)
+                .cmp(&rank(b.0))
                 .then_with(|| {
                     // availability × health descending, then est_cost ascending
                     (b.1 * b.2).total_cmp(&(a.1 * a.2))
@@ -746,7 +776,7 @@ pub fn order_candidates<'a>(
         // then does headroom spread load among the rest.
         let fair = |s: &(&Model, f64, f64, f64, u64)| (s.1 > FAIRNESS_MIN_AVAIL).then_some(s.3);
         out.sort_by(|a, b| {
-            a.0.grade_rank.cmp(&b.0.grade_rank).then_with(|| {
+            rank(a.0).cmp(&rank(b.0)).then_with(|| {
                 (b.1 * b.2 * b.0.weight)
                     .total_cmp(&(a.1 * a.2 * a.0.weight))
                     .then_with(|| a.4.cmp(&b.4)) // drain: soonest-dying first
@@ -864,10 +894,10 @@ mod tests {
         let now = parse_rfc3339_unix("2026-10-11T08:52:58Z").unwrap();
         let codex = provider_availability(qs.providers.get("codex"), false, now);
         assert_eq!(codex.score, 0.0);
-        // 09:35:42 reset − 120s safety
+        // Honor the actual reset; do not retry before the provider permits it.
         assert_eq!(
             codex.retry_after_unix,
-            Some(parse_rfc3339_unix("2026-10-11T09:33:42Z").unwrap())
+            Some(parse_rfc3339_unix("2026-10-11T09:35:42Z").unwrap())
         );
         // z.ai 30%: fully available
         let zai = provider_availability(qs.providers.get("z.ai"), false, now);
@@ -895,6 +925,81 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn exhausted_windows_recover_only_after_all_blockers_reset() {
+        let p = panel(
+            &[(100.0, Some(1100)), (100.0, Some(1300)), (10.0, Some(1050))],
+            None,
+        );
+        for now in [1000, 1100, 1299] {
+            let a = provider_availability(Some(&p), true, now);
+            assert_eq!(a.score, 0.0);
+            assert_eq!(a.retry_after_unix, Some(1300));
+        }
+        let a = provider_availability(Some(&p), true, 1300);
+        assert!(
+            a.score > 0.0,
+            "header-only provider can refresh after reset"
+        );
+        assert_eq!(a.retry_after_unix, None);
+    }
+
+    #[test]
+    fn resetless_exhaustion_expires_with_staleness_except_active_manual_override() {
+        let mut p = panel(&[(100.0, None)], None);
+        assert_eq!(provider_availability(Some(&p), false, 1000).score, 0.0);
+        assert!(provider_availability(Some(&p), true, 1000).score > 0.0);
+        p.manual_until = Some(1200);
+        assert_eq!(provider_availability(Some(&p), true, 1100).score, 0.0);
+        assert!(provider_availability(Some(&p), true, 1200).score > 0.0);
+    }
+
+    #[test]
+    fn draining_short_window_preserves_weekly_scarcity_and_pace() {
+        let now = 1000;
+        let mut p = panel(
+            &[(10.0, Some(now + 60)), (99.0, Some(now + 7 * 86400))],
+            None,
+        );
+        p.windows[1].pace = Some(Pace::Ahead(20.0));
+        let a = provider_availability(Some(&p), false, now);
+        assert!((a.score - 0.335 * PACE_AHEAD_PENALTY).abs() < 1e-9);
+        assert!(a.notes.iter().any(|n| n.starts_with("draining")));
+        p.windows[1].pct = 100.0;
+        assert_eq!(provider_availability(Some(&p), false, now).score, 0.0);
+    }
+
+    #[test]
+    fn estimates_structured_text_and_tool_payloads_for_context_and_cost() {
+        let payload = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "x".repeat(40000)}]},
+                {"role": "assistant", "content": null, "tool_calls": [{"type": "function",
+                    "function": {"name": "search", "arguments": "y".repeat(8000)}}]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "z".repeat(8000)}
+            ],
+            "tools": [{"type": "function", "function": {"name": "search", "description": "q".repeat(8000)}}],
+            "response_format": {"type": "json_schema", "json_schema": {"description": "r".repeat(8000)}},
+            "max_completion_tokens": 100
+        });
+        let est = estimate_request(&payload);
+        assert!(est.est_in >= 18000.0);
+        assert_eq!(est.max_tokens, Some(100));
+        let small = Model {
+            context: Some(16000),
+            cost_in: 1.0,
+            ..Default::default()
+        };
+        assert!(!context_fits(&small, &est));
+        assert!(est_cost(&small, &est) >= 0.018);
+        let overflow = RequestEstimate {
+            est_in: 100.0,
+            est_out: 0.0,
+            max_tokens: Some(u64::MAX),
+        };
+        assert!(!context_fits(&small, &overflow));
     }
 
     #[test]
@@ -1136,6 +1241,7 @@ mod tests {
             profiles: vec![],
             provenance: "manual".into(),
             role_map: Default::default(),
+            capabilities: Default::default(),
         };
         let ma = m("a/m");
         let mb = m("b/m");
@@ -1223,6 +1329,7 @@ mod tests {
             profiles: vec![],
             provenance: "manual".into(),
             role_map: Default::default(),
+            capabilities: Default::default(),
         };
         let mp = m("x/pricey", 9.0, 27.0);
         let mm = m("x/mid", 1.0, 4.0);
@@ -1266,6 +1373,7 @@ mod tests {
             provenance: "manual".into(),
             role_map: Default::default(),
             wire: "openai".into(),
+            capabilities: Default::default(),
         };
         let slow = m("x/slow", 1);
         let fast = m("x/fast", 1);
@@ -1296,7 +1404,7 @@ mod tests {
             ]
         });
         let est = estimate_request(&payload);
-        assert!((est.est_in - 1000.0).abs() < 1e-9);
+        assert!(est.est_in >= 1000.0, "message structure is included");
         assert_eq!(est.max_tokens, Some(100_000));
         assert!((est.est_out - 4096.0).abs() < 1e-9, "min(100k,8192)×0.5");
 
@@ -1341,6 +1449,7 @@ mod tests {
             profiles: vec![],
             provenance: "manual".into(),
             role_map: Default::default(),
+            capabilities: Default::default(),
         }
     }
 
@@ -1361,7 +1470,7 @@ mod tests {
             ..model_stub()
         };
         let retry = nearest_retry_unix(&quota, &ProviderMap::default(), &[&m1, &m2]);
-        assert_eq!(retry, Some(now + 600 - RESET_SAFETY_SECS));
+        assert_eq!(retry, Some(now + 600));
     }
 }
 

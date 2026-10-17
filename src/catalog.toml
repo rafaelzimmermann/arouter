@@ -71,11 +71,6 @@ match = [
 ]
 notes = "small/mid open families"
 
-# ── heuristic breakpoints (blended $/Mtok = (in + 3×out)/4) ────────────
-# Cheaper is favored: an unknown *priced* model earns a grade when its
-# blended price is at or BELOW the ceiling (cheap → higher grade).
-# Free (price 0) and unpriced models never guess upward (C + unknown).
-[heuristic]
-a_plus_max = 0.15
-a_max = 1.0
-b_max = 4.0
+# Unmatched remote models use the lowest grade. Unknown local models
+# default to B (or the lowest grade for models ≤ 3B). Pricing and context
+# capacity never establish quality; use a catalog entry or explicit grade.

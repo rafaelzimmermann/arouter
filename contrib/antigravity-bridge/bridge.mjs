@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 // Google generateContent compatibility endpoint backed by the signed-in
 // Antigravity CLI. Requests are one-shot, isolated CLI turns; this is a
-// text-only adapter, not a Google Generative Language API credential shim.
+// compatibility adapter, not a Google Generative Language API credential shim.
+// Function calling is emulated: tool declarations are rendered into the
+// prompt and the CLI's structured JSON output is translated back into Google
+// functionCall parts. generationConfig knobs the CLI cannot honor are ignored
+// (reasoning effort maps to --effort, a response schema to --json-schema).
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -35,17 +39,53 @@ async function body(req) {
   catch { throw bad('Expected a JSON body'); }
 }
 
+// Gemini's generationConfig carries knobs the Antigravity CLI cannot honor.
+// Rejecting the whole request made the bridge unusable — arouter's adapter
+// always sends maxOutputTokens because clients send max_tokens — so accept the
+// object: map what the CLI exposes (reasoning effort) and ignore the rest.
+function generationOptions(input) {
+  const cfg = input.generationConfig ?? {};
+  if (typeof cfg !== 'object' || Array.isArray(cfg)) throw bad('generationConfig must be an object');
+  let effort;
+  const thinking = cfg.thinkingConfig;
+  if (thinking && typeof thinking === 'object') {
+    if (typeof thinking.thinkingLevel === 'string') effort = thinking.thinkingLevel;
+    else if (thinking.thinkingBudget !== undefined) {
+      const budget = Number(thinking.thinkingBudget);
+      if (!Number.isFinite(budget) || budget < 0) effort = 'high'; // dynamic budget
+      else if (budget === 0 || budget <= 2048) effort = 'low';
+      else if (budget <= 8192) effort = 'medium';
+      else effort = 'high';
+    }
+  }
+  // `--json-schema` covers Gemini's structured-output request.
+  const structured = cfg.responseMimeType === 'application/json' && cfg.responseSchema && typeof cfg.responseSchema === 'object'
+    ? cfg.responseSchema : null;
+  return { effort, structured };
+}
+
+// arouter replays prior tool calls/results as functionCall/functionResponse
+// parts. The CLI has no such protocol, so they become transcript lines; the
+// declarations drive the JSON contract the model answers with.
+function toolDeclarations(input) {
+  if (input.toolConfig?.functionCallingConfig?.mode === 'NONE') return [];
+  const decls = [];
+  for (const tool of input.tools ?? []) {
+    for (const fn of tool.functionDeclarations ?? []) {
+      if (typeof fn?.name !== 'string' || !fn.name) throw bad('Each function declaration needs a name');
+      decls.push({ name: fn.name, description: fn.description ?? '', parameters: fn.parameters ?? { type: 'object' } });
+    }
+  }
+  return decls;
+}
+
 function promptFromGoogle(input) {
   if (!Array.isArray(input.contents) || input.contents.length === 0) throw bad('contents must be a non-empty array');
-  if (input.tools || input.toolConfig) throw bad('Antigravity bridge does not support function calling', 501);
-  if (input.generationConfig && Object.keys(input.generationConfig).length) {
-    throw bad('Antigravity CLI does not expose Gemini generationConfig controls', 501);
-  }
-  if (input.safetySettings) throw bad('Antigravity bridge does not expose Gemini safety settings', 501);
   const blocks = [];
   if (input.systemInstruction) {
-    const text = (input.systemInstruction.parts ?? []).map((p) => p.text).filter((s) => typeof s === 'string');
-    if (text.length !== (input.systemInstruction.parts ?? []).length) throw bad('Only text system instructions are supported', 501);
+    const parts = input.systemInstruction.parts ?? [];
+    const text = parts.map((p) => p.text).filter((s) => typeof s === 'string');
+    if (text.length !== parts.length) throw bad('Only text system instructions are supported', 501);
     if (text.length) blocks.push(`System instructions:\n${text.join('\n')}`);
   }
   for (const turn of input.contents) {
@@ -53,21 +93,60 @@ function promptFromGoogle(input) {
     if (!Array.isArray(turn.parts) || !turn.parts.length) throw bad('Each content turn needs at least one part');
     const text = [];
     for (const part of turn.parts) {
-      if (typeof part.text !== 'string') throw bad('Antigravity bridge supports text parts only', 501);
-      text.push(part.text);
+      if (typeof part.text === 'string') {
+        text.push(part.text);
+      } else if (part.functionCall) {
+        text.push(`Assistant called ${part.functionCall.name}(${JSON.stringify(part.functionCall.args ?? {})})`);
+      } else if (part.functionResponse) {
+        text.push(`Tool ${part.functionResponse.name} returned ${JSON.stringify(part.functionResponse.response ?? {})}`);
+      } else {
+        throw bad('Antigravity bridge supports text and tool parts only', 501);
+      }
     }
     blocks.push(`${turn.role === 'model' ? 'Assistant' : 'User'}:\n${text.join('\n')}`);
   }
   // Keep this a single model answer. In particular, never pass client content
   // as an instruction to use Antigravity's filesystem, terminal, or MCP tools.
-  blocks.push('Answer the conversation directly. Do not use tools, access files, or perform actions.');
+  blocks.push('Answer the conversation directly. Do not access files or perform actions yourself.');
   return blocks.join('\n\n');
 }
 
-function runCli({ cli, model, prompt, cwd, timeoutMs, signal }) {
+// The JSON contract for emulated function calling: prose in `text`, calls in
+// `tool_calls`. `--json-schema` makes the CLI return `structured_output`.
+function toolInstruction(decls) {
+  const lines = decls.map((d) => `- ${d.name}: ${d.description}\n  parameters: ${JSON.stringify(d.parameters)}`);
+  return ['You may call the functions below, but you cannot execute them.',
+    'Answer as JSON. Put prose in "text"; to call functions add "tool_calls"',
+    '(an array of {"name", "arguments"}). Use only the listed names.',
+    'Functions:', ...lines].join('\n');
+}
+
+function toolResponseSchema(decls) {
+  return {
+    type: 'object',
+    properties: {
+      text: { type: 'string' },
+      tool_calls: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', enum: decls.map((d) => d.name) },
+            arguments: { type: 'object' },
+          },
+          required: ['name'],
+        },
+      },
+    },
+  };
+}
+
+function runCli({ cli, model, prompt, cwd, timeoutMs, signal, effort, jsonSchema }) {
   return new Promise((resolve, reject) => {
     const args = ['--print', prompt, '--model', model, '--output-format', 'json',
       '--print-timeout', `${Math.ceil(timeoutMs / 1000)}s`, '--sandbox', '--mode', 'plan', '--disable-slash-commands'];
+    if (effort) args.push('--effort', effort);
+    if (jsonSchema) args.push('--json-schema', JSON.stringify(jsonSchema));
     const child = spawn(cli, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: process.env });
     let stdout = '';
     let stderr = '';
@@ -94,19 +173,34 @@ function runCli({ cli, model, prompt, cwd, timeoutMs, signal }) {
   });
 }
 
-function googleResponse(result, model) {
-  const text = result.response;
+function googleResponse(result, model, { toolMode = false, structured = null } = {}) {
+  const parts = [];
+  if (toolMode) {
+    const out = result.structured_output ?? {};
+    if (typeof out.text === 'string' && out.text.trim()) parts.push({ text: out.text });
+    for (const call of Array.isArray(out.tool_calls) ? out.tool_calls : []) {
+      if (typeof call?.name !== 'string' || !call.name) continue;
+      const args = call.arguments && typeof call.arguments === 'object' ? call.arguments : {};
+      parts.push({ functionCall: { name: call.name, args } });
+    }
+    // Never report an empty turn as success: fall back to the raw response.
+    if (!parts.length) parts.push({ text: typeof result.response === 'string' ? result.response : '' });
+  } else if (structured && result.structured_output !== undefined) {
+    parts.push({ text: JSON.stringify(result.structured_output) });
+  } else {
+    parts.push({ text: String(result.response ?? '') });
+  }
   const promptTokens = Number(result.usage?.input_tokens ?? 0);
   const outputTokens = Number(result.usage?.output_tokens ?? 0);
   return {
-    candidates: [{ content: { role: 'model', parts: [{ text }] }, finishReason: 'STOP', index: 0 }],
+    candidates: [{ content: { role: 'model', parts }, finishReason: 'STOP', index: 0 }],
     usageMetadata: { promptTokenCount: promptTokens, candidatesTokenCount: outputTokens,
       totalTokenCount: Number(result.usage?.total_tokens ?? promptTokens + outputTokens) },
     modelVersion: model,
   };
 }
 
-export function createBridge({ key, models, cli = '/home/spike/.local/bin/agy', timeoutMs = 180_000, concurrency = 2 }) {
+export function createBridge({ key, models, cli = '/home/spike/.local/bin/agy', timeoutMs = 180_000, concurrency = 2, run = runCli }) {
   let active = 0;
   return createServer(async (req, res) => {
     const abort = new AbortController();
@@ -126,19 +220,26 @@ export function createBridge({ key, models, cli = '/home/spike/.local/bin/agy', 
       if (!models.includes(model)) throw bad('Model is not enabled on this bridge', 404);
       if (url.searchParams.has('alt') && url.searchParams.get('alt') !== 'sse') throw bad('Only alt=sse is supported');
       const input = await body(req);
-      const prompt = promptFromGoogle(input);
+      const options = generationOptions(input);
+      const decls = toolDeclarations(input);
+      const toolMode = decls.length > 0;
+      const schema = toolMode ? toolResponseSchema(decls) : options.structured;
+      const prompt = toolMode
+        ? `${promptFromGoogle(input)}\n\n${toolInstruction(decls)}`
+        : promptFromGoogle(input);
       if (active >= concurrency) throw bad('Antigravity bridge is at capacity', 429);
       active++;
       let result;
       let workdir;
       try {
         workdir = await mkdtemp(join(tmpdir(), 'arouter-agy-'));
-        result = await runCli({ cli, model, prompt, cwd: workdir, timeoutMs, signal: abort.signal });
+        result = await run({ cli, model, prompt, cwd: workdir, timeoutMs, signal: abort.signal,
+          effort: options.effort, jsonSchema: schema });
       } finally {
         active--;
         if (workdir) await rm(workdir, { recursive: true, force: true });
       }
-      const response = googleResponse(result, model);
+      const response = googleResponse(result, model, { toolMode, structured: options.structured });
       if (method === 'generateContent') return json(res, 200, response);
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
       res.end(`data: ${JSON.stringify(response)}\n\n`);

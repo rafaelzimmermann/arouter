@@ -386,6 +386,7 @@ pub fn merge_discovered(
             provenance,
             rationale,
             role_map: None,
+            capabilities: Vec::new(),
         });
     }
     merged
@@ -477,6 +478,7 @@ mod tests {
             rationale: String::new(),
             role_map: None,
             wire: None,
+            capabilities: Vec::new(),
         };
         // grouping is inside discover() — offline: just assert the key
         // math via the same tuple the map uses

@@ -185,6 +185,14 @@ pub fn engine_for<'a>(state: &'a LocalState, base_url: &str) -> Option<&'a Engin
 /// already resident on a non-busy engine float to the front of their
 /// grade group. Everything else keeps the incoming order exactly.
 pub fn boost_residency<'a>(ordered: Vec<&'a Model>, state: &LocalState) -> Vec<&'a Model> {
+    boost_residency_by_rank(ordered, state, |m| m.grade_rank)
+}
+
+pub fn boost_residency_by_rank<'a>(
+    ordered: Vec<&'a Model>,
+    state: &LocalState,
+    rank: impl Fn(&Model) -> usize,
+) -> Vec<&'a Model> {
     let mut scored: Vec<(&Model, u8)> = ordered
         .into_iter()
         .map(|m| {
@@ -199,7 +207,7 @@ pub fn boost_residency<'a>(ordered: Vec<&'a Model>, state: &LocalState) -> Vec<&
             (m, u8::from(!boost))
         })
         .collect();
-    scored.sort_by(|a, b| a.0.grade_rank.cmp(&b.0.grade_rank).then(a.1.cmp(&b.1)));
+    scored.sort_by(|a, b| rank(a.0).cmp(&rank(b.0)).then(a.1.cmp(&b.1)));
     scored.into_iter().map(|(m, _)| m).collect()
 }
 
@@ -259,6 +267,17 @@ pub fn boost_sticky<'a>(
     sticky: &StickyMap,
     caller: &str,
 ) -> Vec<&'a Model> {
+    boost_sticky_by_rank(ordered, sticky, caller, |m| m.grade_rank)
+}
+
+pub fn boost_sticky_by_rank<'a>(
+    ordered: Vec<&'a Model>,
+    sticky: &StickyMap,
+    caller: &str,
+    rank: impl Fn(&Model) -> usize,
+) -> Vec<&'a Model> {
+    // Sticky records use global grades; the boost must respect the request's
+    // effective grade order even when a group overrides those grades.
     // grade ranks present in the list → per-grade sticky targets
     let mut sticky_by_rank: BTreeMap<usize, String> = BTreeMap::new();
     for m in &ordered {
@@ -275,7 +294,7 @@ pub fn boost_sticky<'a>(
             (m, u8::from(!is_sticky))
         })
         .collect();
-    scored.sort_by(|a, b| a.0.grade_rank.cmp(&b.0.grade_rank).then(a.1.cmp(&b.1)));
+    scored.sort_by(|a, b| rank(a.0).cmp(&rank(b.0)).then(a.1.cmp(&b.1)));
     scored.into_iter().map(|(m, _)| m).collect()
 }
 

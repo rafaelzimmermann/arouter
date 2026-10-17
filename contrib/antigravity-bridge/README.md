@@ -2,11 +2,17 @@
 
 This host service exposes a Google `generateContent` shaped endpoint for
 arouter, then runs each request through the signed-in Antigravity CLI. It
-does not read or copy Antigravity credentials. The bridge supports text only;
-function calls and image or file parts receive an explicit `501` response.
-Requests run in a fresh temporary working directory with CLI sandboxing and
-plan mode enabled. Streaming requests return one SSE event after the answer is
-complete.
+does not read or copy Antigravity credentials. Requests run in a fresh
+temporary working directory with CLI sandboxing and plan mode enabled.
+Streaming requests return one SSE event after the answer is complete.
+
+Function calling is emulated: tool declarations are rendered into the prompt
+and the CLI's `--json-schema` structured output is translated back into Google
+`functionCall` parts. Reasoning effort (`thinkingConfig`) maps to `--effort`;
+a JSON response schema maps to `--json-schema`; other `generationConfig` knobs
+(`temperature`, `maxOutputTokens`, …) and `safetySettings` are accepted and
+ignored because the CLI does not expose them. Image and file parts still
+receive an explicit `501`.
 
 ## Install
 
@@ -70,5 +76,8 @@ context = 200000
 The bridge process must run on the same host and as the same user as the
 Antigravity login. Keep it off public interfaces; the random bridge key is
 required for every model request. The CLI controls upstream model access and
-usage. Standard text chat works; tools, images, and files are intentionally
-unsupported by this CLI adapter.
+usage. Text chat and emulated function calling work; images and files are
+intentionally unsupported by this CLI adapter.
+
+Run the bridge tests with `node --experimental-test-isolation=none --test
+contrib/antigravity-bridge/bridge.test.mjs`.

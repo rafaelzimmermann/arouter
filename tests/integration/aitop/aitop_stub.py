@@ -56,10 +56,8 @@ FIXTURES = {
             {"name": "zai", "rows": [row("5h window", 33, "120"), row("daily", 40, "500")]},
         ],
     },
-    # zai 5h window 33% but resetting in ~2h. The drain rule lifts zai's
-    # pace penalty (drain makes pace meaningless for a dying window), the
-    # composite ties 1.0 vs 1.0, and the drain axis — ranked above headroom
-    # — steers same-grade A requests to zai, beating codex's headroom.
+    # The short window drains, but the daily window is ahead of pace.
+    # Its independent preservation penalty must still favor codex.
     "zai_draining": {
         "fetched_at": FAR,
         "panels": [
@@ -68,13 +66,20 @@ FIXTURES = {
         ],
     },
 }
+# Positive drain case: only the expiring window is ahead of pace. Its
+# penalty can lift without consuming a constrained longer allowance.
+FIXTURES["zai_draining_safe"] = json.loads(json.dumps(FIXTURES["zai_draining"]))
+FIXTURES["zai_draining_safe"]["panels"][1]["rows"][0]["pace"] = "pace ahead 20%"
+FIXTURES["zai_draining_safe"]["panels"][1]["rows"][1]["pace"] = ""
+
 
 
 def fixtures():
     # refresh the near-future reset lazily so long-lived rigs stay in the
     # drain horizon
     out = json.loads(json.dumps(FIXTURES))
-    out["zai_draining"]["panels"][1]["rows"][0]["reset_at"] = near(2)
+    for name in ["zai_draining", "zai_draining_safe"]:
+        out[name]["panels"][1]["rows"][0]["reset_at"] = near(2)
     return out
 
 lock = threading.Lock()

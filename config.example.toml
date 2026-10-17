@@ -138,6 +138,12 @@ description = "premium models for hard tasks"
 #       gemini speaks Google's generateContent JSON API: base_url defaults
 #       to https://generativelanguage.googleapis.com/v1beta and the key
 #       rides x-goog-api-key; thinking tokens count into output spend.
+# capabilities: capability-aware routing hints. `vision` = the model
+#       accepts image inputs; `reasoning` = it accepts `reasoning_effort`.
+#       A non-empty list is authoritative and REPLACES the curated table
+#       (src/capabilities.toml) + name heuristic, so list the full set;
+#       omit the key to auto-derive. A request with an image routes only
+#       to vision models, a reasoning_effort only to reasoning models.
 #
 # Cross-pool fallback is explicit opt-in (routing.md §2). When the quota
 # pool is exhausted, `cross_pool = ["ondemand"]` would pay instead of
@@ -198,6 +204,14 @@ pool      = ["quota"]
 wire      = "gemini"
 auth      = "env:GEMINI_API_KEY"
 # base_url is optional (defaults to the Google JSON API surface)
+
+[[models]]
+id        = "ollama/qwen2.5vl:7b"
+grade     = "B"
+pool      = ["local"]
+# capabilities = ["vision"]  # optional: only when inference can't tell
+base_url  = "http://127.0.0.1:11435/v1"
+auth      = "none"
 
 [[models]]
 id        = "ollama/qwen3:14b"

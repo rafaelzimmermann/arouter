@@ -4,6 +4,7 @@
 //! process boundary. See PLAN.md and docs/ for the design.
 
 pub mod budget;
+pub mod capabilities;
 pub mod catalog;
 pub mod codex;
 pub mod config;

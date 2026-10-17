@@ -210,7 +210,11 @@ impl Health {
     }
 
     pub fn penalty(&self, id: &str) -> f64 {
-        let map = self.entries.lock().unwrap();
+        let now = Instant::now();
+        let mut map = self.entries.lock().unwrap();
+        if let Some(e) = map.get_mut(id) {
+            self.prune(e, now);
+        }
         match map.get(id) {
             Some(e)
                 if e.samples.len() >= self.policy.penalty_min_samples
@@ -225,9 +229,10 @@ impl Health {
     /// Snapshot for `/status.json` and the monitor (E5).
     pub fn snapshot(&self) -> BTreeMap<String, HealthSnapshot> {
         let now = Instant::now();
-        let map = self.entries.lock().unwrap();
-        map.iter()
+        let mut map = self.entries.lock().unwrap();
+        map.iter_mut()
             .filter_map(|(id, e)| {
+                self.prune(e, now);
                 let state = e.state(now);
                 let relevant = state != HealthState::Healthy || !e.samples.is_empty();
                 relevant.then(|| {
@@ -344,6 +349,34 @@ mod tests {
         h.record_failure("m", false); // ratio 2/3 > 0.5, 3 samples < 5
         assert!(!h.is_excluded("m"), "circuit not tripped yet");
         assert!((h.penalty("m") - 0.5).abs() < 1e-9, "penalty band active");
+    }
+
+    #[test]
+    fn idle_models_lose_expired_penalties_without_another_request() {
+        let h = Health::new(HealthPolicy {
+            circuit_min_samples: 100,
+            ..HealthPolicy::default()
+        });
+        for id in ["scored", "snapshot-only"] {
+            for _ in 0..3 {
+                h.record_failure(id, false);
+            }
+            assert_eq!(h.penalty(id), 0.5);
+        }
+        {
+            let mut map = h.entries.lock().unwrap();
+            let old = Instant::now() - h.policy.circuit_window - Duration::from_secs(1);
+            for entry in map.values_mut() {
+                for (time, _) in &mut entry.samples {
+                    *time = old;
+                }
+            }
+        }
+        assert_eq!(h.penalty("scored"), 1.0);
+        assert!(
+            h.snapshot().is_empty(),
+            "expired one-hour samples are not reported"
+        );
     }
 
     #[test]

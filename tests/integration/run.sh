@@ -130,8 +130,8 @@ check "scarce (90%) still serves"       '[ "$(code)" = 200 ] && [ "$(hdr upstrea
 # drain (use-it-or-lose-it): baseline first — under `healthy`, at grade A
 # the composite prefers codex (zai is pace-penalized to 0.75) and even a
 # tie would fall to headroom (codex 97% x far reset vs zai 67%). Then zai
-# 5h goes draining (reset ~2h): drain lifts zai's pace penalty, ties the
-# composite, and the drain axis — ranked above headroom — takes over.
+# 5h goes draining (reset ~2h): the daily penalty must survive. Only
+# when the pace penalty belongs to the expiring window may drain lift it.
 aitop_mode healthy
 wait_window codex "5h window" 3
 req "$ALICE" /v1/chat/completions "$(printf "$CHAT" A)" >/dev/null
@@ -140,7 +140,12 @@ check "A baseline: codex preferred (pace + headroom)" \
 aitop_mode zai_draining
 wait_drain zai up
 req "$ALICE" /v1/chat/completions "$(printf "$CHAT" A)" >/dev/null
-check "draining zai beats codex headroom at same grade" \
+check "draining short window preserves separate daily pace penalty" \
+  '[ "$(code)" = 200 ] && [ "$(hdr upstream)" = stuba/two ]'
+aitop_mode zai_draining_safe
+wait_drain zai up
+req "$ALICE" /v1/chat/completions "$(printf "$CHAT" A)" >/dev/null
+check "unconstrained draining zai beats codex headroom at same grade" \
   '[ "$(code)" = 200 ] && [ "$(hdr upstream)" = stubb/beta ]'
 check "drain countdown gauge positive" \
   'v=$(curl -sS -m 10 -H "$ALICE" "$BASE/metrics" | grep -F "arouter_quota_drain_reset_secs{provider=\"zai\"}" | awk "{print \$NF}"); [ -n "$v" ] && [ "$v" -gt 0 ]'

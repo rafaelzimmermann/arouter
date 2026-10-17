@@ -443,6 +443,14 @@ pub struct ModelConfig {
     /// `developer` role). Keys/values are chat-completion role names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role_map: Option<std::collections::BTreeMap<String, String>>,
+    /// Declared capabilities for capability-aware routing: `vision`
+    /// (accepts image inputs) and/or `reasoning` (accepts
+    /// `reasoning_effort`). A non-empty list is AUTHORITATIVE — it
+    /// replaces the curated capability table and name heuristic, so list
+    /// the full set; empty/absent auto-derives from table + heuristic.
+    /// Requests requiring a capability route only to models that declare it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
 }
 
 impl Default for ModelConfig {
@@ -463,6 +471,7 @@ impl Default for ModelConfig {
             provenance: String::new(),
             rationale: String::new(),
             role_map: None,
+            capabilities: Vec::new(),
         }
     }
 }

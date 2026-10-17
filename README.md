@@ -44,21 +44,23 @@ remain the power-user shorthand for the URL's pool. Upstream accounts go in `~/.
 
 ## What it decides
 
-**Routing groups — the easy surface.** `/v1/models` lists one entry per group×grade (config-defined `[[groups]]` × the group ladder), defaults: `arouter-subscription-A+`, `arouter-subscription-A`, …, `arouter-local-*`, `arouter-ondemand-*` — one group per pool, subscription and on-demand falling back to local. Send `"model": "arouter-subscription-A+"` to pin that grade inside the group; the bare id (`"model": "arouter-subscription"`) delegates the whole ladder to the routing strategy, and a range like `arouter-subscription-A+..A` caps degradation. Explicit-member groups can mix providers and pools: models at the same group grade are considered together by the routing heuristic. A group's fallback pools are consulted only if it has no eligible member at the requested grade.
-
-For a request that should use one configured upstream directly, send its exact model id (for example `codex/gpt-6-astra`). arouter pins that model and still checks its configured pool, profile visibility, quota, health, context, and budget before sending the request.
+**Routing groups — the easy surface.** `/v1/models` lists one entry per group×grade (config-defined `[[groups]]` × the group ladder), defaults: `arouter-subscription-A+`, `arouter-subscription-A`, …, `arouter-local-*`, `arouter-ondemand-*` — one group per pool, subscription and on-demand falling back to local. Send `"model": "arouter-subscription-A+"` to pin that grade inside the group; the bare id (`"model": "arouter-subscription"`) delegates the whole ladder to the routing strategy, and a range like `arouter-subscription-A+..A` caps degradation. Groups can also list explicit members across providers with per-member grade overrides and their own ladder — everything is configuration.
 
 For a request that should use one configured upstream directly, send its exact model id (for example `codex/gpt-6-astra`). arouter pins that model and still checks its configured pool, profile visibility, quota, health, context, and budget before sending the request.
 
 **Grades, pools, profiles.** You request `A+`, `A`, `B` — or a range like `"A+..A"` to cap degradation. Pools are hard boundaries: `/v1` = your subscriptions/quotas (default), `/local/v1` = local engines, `/ondemand/v1` = pay-per-token. Profiles add per-task overlays via the URL path (`/night/v1/...`): their own ladder, budgets and model visibility. Falling back from a free pool into a paid one is explicit opt-in (`cross_pool = ["ondemand"]`) and always labeled in the response. (Grade tokens and pool paths remain the power-user surface; groups are what clients see.)
 
-**Quota awareness.** arouter asks its upstreams for quota directly: the documented OpenRouter key endpoint by default, `x-ratelimit-*` headers harvested from the responses it already proxies (a 429 is ground truth — exhausted until its `Retry-After` says otherwise), an opt-in fetcher for z.ai coding plans, and hand-pinned windows for providers with no quota API at all. It then scores each provider: exhausted windows are skipped until their reset (arouter's own 429 carries a reset-aware `Retry-After`), scarce windows and too-fast burn rates are deprioritized, equally-healthy providers spread by remaining headroom. Windows resetting within 4h enter **drain mode** — penalties lift and ties resolve toward the soonest reset, so expiring quota gets spent instead of wasted. Live numbers: `/status.json` and the `arouter_quota_*` gauges.
+**Capability-aware routing.** arouter knows what each model can execute and routes accordingly: a prompt with an image goes only to multimodal models, a `reasoning_effort` only to reasoning models — no hand-built `*-vision` groups needed. Capabilities come from explicit `[[models]].capabilities`, a curated table (`src/capabilities.toml`), and a name heuristic, all unioned. When no candidate supports a required capability, the request fails with a clear `no candidates support required capabilities: …` instead of hitting an upstream that can't run it.
+
+**Quota awareness.** arouter asks its upstreams for quota directly: the documented OpenRouter key endpoint by default, `x-ratelimit-*` headers harvested from the responses it already proxies (a 429 is ground truth — exhausted until its `Retry-After` says otherwise), an opt-in fetcher for z.ai coding plans, and hand-pinned windows for providers with no quota API at all. It then scores each provider: exhausted windows are skipped until their reset (arouter's own 429 carries a reset-aware `Retry-After`), scarce windows and too-fast burn rates are deprioritized, equally-healthy providers spread by remaining headroom. Windows resetting within 4h enter **drain mode** — their preservation penalties lift and ties resolve toward the soonest reset. Other windows still constrain routing, so an expiring short allowance cannot override a scarce weekly allowance. Exhausted windows become retryable at their actual reset time; stale samples without reset times become unknown rather than blocking forever (active manual overrides remain enforced). Live numbers: `/status.json` and the `arouter_quota_*` gauges.
+
+**Request estimates.** Context and cost estimates include message content blocks, tool calls/results, tool schemas, and output schemas. They use serialized bytes divided by four, so they remain estimates rather than model-specific token counts.
 
 **On-demand budgets.** Chargeable attempts pass stacked spend guards before leaving arouter: pool budget, per-profile budget, per-caller daily cap — tightest wins. Responses carry `X-Arouter-Cost-Usd` and `X-Arouter-Budget-Remaining-Today`.
 
 **Local engine smarts.** arouter polls ollama (`/api/ps`) and llama.cpp/strata (`/slots`): requests prefer models that are already resident (no multi-second cold loads), skip engines mid-generation, and stick to the model that just served a caller (warm KV cache). All of it only reorders *within* a grade — never across grades or pools.
 
-**Self-healing.** Failing models cool down (30s→2m→8m→30m) and eventually trip a circuit breaker; `/status.json` shows per-model health. Discovery polls upstreams for new models every few minutes and grades them from an embedded catalog (GPT, Claude, GLM, Gemini, Qwen, Llama…) plus a price/keyword heuristic — manual entries always win. `kill -HUP` hot-reloads config without dropping the daemon.
+**Self-healing.** Failing models cool down (30s→2m→8m→30m) and eventually trip a circuit breaker; old failure samples expire from scores and `/status.json` after the health window, even when a model receives no traffic. Discovery polls upstreams for new models every few minutes and grades them from an embedded catalog (GPT, Claude, GLM, Gemini, Qwen, Llama…) with conservative defaults for unknown models — manual entries always win. Unknown remote models receive the lowest grade (normally C); unknown local models receive B, or the lowest grade for models ≤ 3B. Price and context size never promote an unknown model to a premium grade. Saved grades in `grades.auto.toml` retain their explicit precedence; regenerate that file to refresh earlier automatic decisions. `kill -HUP` hot-reloads config without dropping the daemon.
 
 ## Watch it work
 
@@ -215,10 +217,12 @@ pools, budgets, quota windows, health, metrics and failover.
 
 For this host's signed-in Antigravity session, use the host-local adapter in
 `contrib/antigravity-bridge/`. It provides the same Google endpoint shape by
-running the official Antigravity CLI in isolated, sandboxed plan mode. This
-adapter supports text chat only; images and function calling are rejected,
-and streaming returns after the CLI finishes its response. Configure its
-local URL and bridge key as shown in that directory's README.
+running the official Antigravity CLI in isolated, sandboxed plan mode. Tool
+declarations are emulated through the CLI's structured JSON output, reasoning
+effort maps to its `--effort` flag, and other `generationConfig` knobs are
+accepted but ignored; images and files are rejected, and streaming returns
+after the CLI finishes its response. Configure its local URL and bridge key as
+shown in that directory's README.
 
 ```toml
 [[models]]

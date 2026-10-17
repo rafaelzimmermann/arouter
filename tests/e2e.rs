@@ -5,8 +5,7 @@
 //! caller identity, and the Prometheus /metrics endpoint.
 
 use arouter::config::{
-    CallerConfig, Config, FallbackConfig, GroupConfig, KeyStore, ModelConfig, ProfileConfig,
-    TimeoutsConfig,
+    CallerConfig, Config, FallbackConfig, KeyStore, ModelConfig, ProfileConfig, TimeoutsConfig,
 };
 use arouter::health::{Health, HealthPolicy};
 use arouter::metrics::Metrics;
@@ -795,6 +794,88 @@ async fn token_grade_scope_filters_before_sort() {
         a_hits.load(Ordering::SeqCst),
         0,
         "A-grade model filtered pre-sort"
+    );
+}
+
+#[tokio::test]
+async fn capability_routing_sends_images_only_to_vision_models() {
+    // Two quota models at the same grade: one text-only, one vision.
+    // An image prompt must skip the text model and land on the vision
+    // model — no hand-built vision group required.
+    let (text_up, text_hits) = counting_good().await;
+    let (vision_up, vision_hits) = counting_good().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![
+        model("zai/glm-5.3", "A", &["quota"], &text_up, 1.0, (0.0, 0.0)),
+        ModelConfig {
+            id: "deepseek/deepseek-flash".into(),
+            grade: "A".into(),
+            pool: vec!["quota".into()],
+            base_url: vision_up.clone(),
+            weight: 1.0,
+            capabilities: vec!["vision".into()],
+            ..ModelConfig::default()
+        },
+    ];
+    let t = test_app(cfg);
+
+    let image_body = r#"{"model":"A","messages":[{"role":"user","content":[
+        {"type":"text","text":"describe"},
+        {"type":"image_url","image_url":{"url":"data:image/png;base64,QQ=="}}
+    ]}]}"#;
+    let resp = post_chat_body(
+        &t.app,
+        "/v1/chat/completions",
+        image_body.into(),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        vision_hits.load(Ordering::SeqCst),
+        1,
+        "image prompt routes to the vision-capable model"
+    );
+    assert_eq!(
+        text_hits.load(Ordering::SeqCst),
+        0,
+        "text-only model never receives an image prompt"
+    );
+}
+
+#[tokio::test]
+async fn exact_model_pin_bypasses_capability_filter() {
+    // An explicit exact-id pin is "use THIS model": it forwards even when
+    // the request would need a capability the model does not declare, and
+    // the upstream produces its own error. Only automatic routing filters.
+    let (text_up, text_hits) = counting_good().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![model(
+        "zai/glm-5.3",
+        "A",
+        &["quota"],
+        &text_up,
+        1.0,
+        (0.0, 0.0),
+    )];
+    let t = test_app(cfg);
+
+    let pinned_image = r#"{"model":"zai/glm-5.3","messages":[{"role":"user","content":[
+        {"type":"text","text":"describe"},
+        {"type":"image_url","image_url":{"url":"data:image/png;base64,QQ=="}}
+    ]}]}"#;
+    let resp = post_chat_body(
+        &t.app,
+        "/v1/chat/completions",
+        pinned_image.into(),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        text_hits.load(Ordering::SeqCst),
+        1,
+        "a direct pin forwards instead of capability-filtering"
     );
 }
 
@@ -1747,109 +1828,6 @@ async fn routing_groups_bare_grade_pinned_and_fallback() {
 }
 
 #[tokio::test]
-async fn mixed_pool_group_routes_same_grade_candidates_together() {
-    let zai = good_json().await;
-    let gpt = good_json().await;
-    let mut cfg = Config::default();
-    cfg.models = vec![
-        model("zai/glm", "A", &["quota"], &zai, 1.0, (0.0, 0.0)),
-        model("or/gpt", "A", &["ondemand"], &gpt, 1.0, (1.0, 4.0)),
-    ];
-    cfg.groups = vec![GroupConfig {
-        id: "arouter-team".into(),
-        pool: None,
-        members: vec!["zai/glm".into(), "or/gpt".into()],
-        grades: Default::default(),
-        ladder: vec![],
-        fallback: vec![],
-    }];
-    let t = test_app_quota(cfg, quota_state_exhausted("zai", 3600));
-
-    let resp = post_chat(
-        &t.app,
-        "/v1/chat/completions",
-        "arouter-team-A",
-        false,
-        HeaderMap::new(),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(hstr(&resp, "x-arouter-upstream"), "or/gpt");
-    assert_eq!(hstr(&resp, "x-arouter-pool"), "ondemand");
-    assert_eq!(hstr(&resp, "x-arouter-cross-pool"), "");
-}
-
-#[tokio::test]
-async fn group_fallback_waits_until_no_eligible_candidate_at_requested_grade() {
-    let failing = bad_500().await;
-    let (fallback, fallback_hits) = counting_good().await;
-    let mut cfg = Config::default();
-    cfg.models = vec![
-        model("zai/glm", "A", &["quota"], &failing, 1.0, (0.0, 0.0)),
-        model("or/gpt", "A", &["ondemand"], &fallback, 1.0, (1.0, 4.0)),
-    ];
-    cfg.groups = vec![GroupConfig {
-        id: "arouter-team".into(),
-        pool: None,
-        members: vec!["zai/glm".into()],
-        grades: Default::default(),
-        ladder: vec![],
-        fallback: vec!["ondemand".into()],
-    }];
-    let t = test_app(cfg);
-
-    let resp = post_chat(
-        &t.app,
-        "/v1/chat/completions",
-        "arouter-team-A",
-        false,
-        HeaderMap::new(),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(fallback_hits.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn group_fallback_runs_when_requested_grade_has_no_eligible_member() {
-    let failing_lower_grade = bad_500().await;
-    let fallback = good_json().await;
-    let mut cfg = Config::default();
-    cfg.models = vec![
-        model(
-            "zai/glm",
-            "B",
-            &["quota"],
-            &failing_lower_grade,
-            1.0,
-            (0.0, 0.0),
-        ),
-        model("or/gpt", "A", &["ondemand"], &fallback, 1.0, (1.0, 4.0)),
-    ];
-    cfg.groups = vec![GroupConfig {
-        id: "arouter-team".into(),
-        pool: None,
-        members: vec!["zai/glm".into()],
-        grades: Default::default(),
-        ladder: vec![],
-        fallback: vec!["ondemand".into()],
-    }];
-    let t = test_app(cfg);
-
-    let resp = post_chat(
-        &t.app,
-        "/v1/chat/completions",
-        "arouter-team-A",
-        false,
-        HeaderMap::new(),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(hstr(&resp, "x-arouter-upstream"), "or/gpt");
-    assert_eq!(hstr(&resp, "x-arouter-cross-pool"), "quota");
-}
-
-#[tokio::test]
 async fn caller_identity_open_and_required_modes() {
     let up = good_json().await;
     let mut cfg = Config::default();
@@ -2217,11 +2195,11 @@ async fn quota_exhausted_429_carries_reset_aware_retry_after() {
 
     let resp = post_chat(&t.app, "/v1/chat/completions", "A", false, HeaderMap::new()).await;
     assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
-    // reset − 120s safety, allowing test-runner slop
+    // Actual provider reset, allowing test-runner slop
     let retry: u64 = hstr(&resp, "retry-after").parse().expect("retry-after set");
     assert!(
-        (460..=481).contains(&retry),
-        "retry-after should be ~480, got {retry}"
+        (580..=601).contains(&retry),
+        "retry-after should be ~600, got {retry}"
     );
     let body = body_string(resp).await;
     assert!(body.contains("arouter_exhausted"), "body: {body}");
@@ -3634,43 +3612,201 @@ async fn observation_endpoints_follow_auth_require() {
 }
 
 #[tokio::test]
-async fn direct_model_selects_only_requested_upstream_and_honors_pool() {
-    let (target, target_hits) = counting_good().await;
-    let (other, other_hits) = counting_good().await;
+async fn header_only_429_returns_from_local_fallback_after_reset_without_restart() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counter = attempts.clone();
+    let primary = spawn_upstream(Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let counter = counter.clone();
+            async move {
+                if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        [("retry-after", "2")],
+                        "rate limited",
+                    )
+                        .into_response()
+                } else {
+                    ([(header::CONTENT_TYPE, "application/json")], JSON_BODY).into_response()
+                }
+            }
+        }),
+    ))
+    .await;
+    let local = good_json().await;
     let mut cfg = Config::default();
     cfg.models = vec![
-        model("codex/target", "A", &["quota"], &target, 1.0, (0.0, 0.0)),
         model(
-            "other/preferred",
-            "A",
+            "subscription/primary",
+            "A+",
             &["quota"],
-            &other,
-            100.0,
+            &primary,
+            1.0,
             (0.0, 0.0),
         ),
+        model("local/fallback", "A+", &["local"], &local, 1.0, (0.0, 0.0)),
     ];
-    let t = test_app(cfg);
-    let resp = post_chat(
+    let t = test_app_health(
+        cfg,
+        HealthPolicy {
+            cooldown_steps: vec![std::time::Duration::from_millis(10)],
+            ..HealthPolicy::default()
+        },
+    );
+    for _ in 0..2 {
+        let response = post_chat(
+            &t.app,
+            "/v1/chat/completions",
+            "arouter-subscription-A+",
+            false,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(hstr(&response, "x-arouter-upstream"), "local/fallback");
+        assert_eq!(hstr(&response, "x-arouter-cross-pool"), "quota");
+        body_string(response).await;
+    }
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "no early retry during quota reset"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+    let response = post_chat(
         &t.app,
         "/v1/chat/completions",
-        "codex/target",
+        "arouter-subscription-A+",
         false,
         HeaderMap::new(),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(hstr(&resp, "x-arouter-upstream"), "codex/target");
-    assert_eq!(target_hits.load(Ordering::SeqCst), 1);
-    assert_eq!(other_hits.load(Ordering::SeqCst), 0);
-    let resp = post_chat(
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        hstr(&response, "x-arouter-upstream"),
+        "subscription/primary"
+    );
+    assert!(!response.headers().contains_key("x-arouter-cross-pool"));
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn group_grades_survive_quota_latency_residency_and_sticky_ordering() {
+    use arouter::config::{GroupConfig, PoolConfig};
+    use arouter::localeng::{EngineKind, EngineState, LoadedModel, LocalState};
+    let up = good_json().await;
+    for (pool, preference) in [
+        ("quota", "manual"),
+        ("quota", "fastest"),
+        ("ondemand", "cheapest"),
+        ("local", "manual"),
+    ] {
+        let mut cfg = Config::default();
+        cfg.routing.sticky_local_secs = 600;
+        cfg.pool.insert(
+            pool.into(),
+            PoolConfig {
+                preference: preference.into(),
+                ..Default::default()
+            },
+        );
+        cfg.models = vec![
+            model("x/preferred", "B", &[pool], &up, 1.0, (10.0, 10.0)),
+            model("y/secondary", "A+", &[pool], &up, 10.0, (0.1, 0.1)),
+        ];
+        cfg.groups = vec![GroupConfig {
+            id: "quality".into(),
+            pool: Some(pool.into()),
+            members: vec![],
+            ladder: vec![],
+            fallback: vec![],
+            grades: [
+                ("x/preferred".into(), "A+".into()),
+                ("y/secondary".into(), "A".into()),
+            ]
+            .into_iter()
+            .collect(),
+        }];
+        let t = test_app(cfg);
+        t.health.record_success_latency("x/preferred", Some(1000));
+        t.health.record_success_latency("y/secondary", Some(1));
+        t.sticky.record("anonymous", 0, "y/secondary");
+        t.local.swap(LocalState {
+            engines: vec![EngineState {
+                url: up.trim_end_matches("/v1").into(),
+                kind: EngineKind::Ollama,
+                busy: false,
+                loaded: [(
+                    "secondary".into(),
+                    LoadedModel {
+                        size_vram: 1,
+                        expires_unix: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            }],
+            fetched_unix: quota::unix_now(),
+            stale: false,
+        });
+        let response = post_chat(
+            &t.app,
+            "/v1/chat/completions",
+            "quality-A+",
+            false,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "{pool}/{preference}");
+        assert_eq!(
+            hstr(&response, "x-arouter-upstream"),
+            "x/preferred",
+            "{pool}/{preference}"
+        );
+        assert_eq!(hstr(&response, "x-arouter-grade"), "A+");
+        assert!(!response.headers().contains_key("x-arouter-degraded"));
+    }
+}
+
+#[tokio::test]
+async fn custom_group_fallback_uses_grade_tokens_not_global_rank_positions() {
+    use arouter::config::GroupConfig;
+    let up = good_json().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![
+        model("primary/m", "A+", &["quota"], &up, 1.0, (0.0, 0.0)),
+        model("local/right", "B", &["local"], &up, 1.0, (0.0, 0.0)),
+        model("local/wrong", "A+", &["local"], &up, 10.0, (0.0, 0.0)),
+    ];
+    cfg.groups = vec![GroupConfig {
+        id: "custom".into(),
+        pool: Some("quota".into()),
+        members: vec![],
+        ladder: vec!["S".into(), "B".into()],
+        fallback: vec!["local".into()],
+        grades: [("primary/m".into(), "S".into())].into_iter().collect(),
+    }];
+    let t = test_app_quota(cfg, quota_state_exhausted("primary", 600));
+    let response = post_chat(
         &t.app,
-        "/local/v1/chat/completions",
-        "codex/target",
+        "/v1/chat/completions",
+        "custom-S",
         false,
         HeaderMap::new(),
     )
     .await;
-    assert!(!resp.status().is_success());
-    assert_eq!(target_hits.load(Ordering::SeqCst), 1);
-    assert_eq!(other_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(hstr(&response, "x-arouter-upstream"), "local/right");
+    assert_eq!(hstr(&response, "x-arouter-grade"), "B");
+    assert_eq!(hstr(&response, "x-arouter-degraded"), "B");
+    let strict = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "custom-S..S",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(strict.status(), StatusCode::TOO_MANY_REQUESTS);
 }

@@ -32,6 +32,10 @@ pub struct Model {
     /// Outgoing role rewrite (config `[[models]].role_map`), e.g.
     /// `developer` → `system` for upstreams that reject the newer role.
     pub role_map: BTreeMap<String, String>,
+    /// Capabilities for capability-aware routing (`vision`, `reasoning`),
+    /// resolved from explicit config (authoritative) → capability table →
+    /// name heuristic.
+    pub capabilities: crate::capabilities::Capabilities,
 }
 
 /// Profile with overlays already merged onto the base routing config.
@@ -78,6 +82,7 @@ impl Registry {
     pub fn from_config(cfg: &Config, keys: &KeyStore) -> anyhow::Result<Self> {
         cfg.validate().map_err(anyhow::Error::msg)?;
         let ladder = cfg.grades.ladder();
+        let cap_table = crate::capabilities::Table::embedded();
 
         let models: Vec<Model> = cfg
             .models
@@ -112,6 +117,7 @@ impl Registry {
                     m.provenance.clone()
                 },
                 role_map: m.role_map.clone().unwrap_or_default(),
+                capabilities: crate::capabilities::for_model(&m.capabilities, &m.id, &cap_table),
             })
             .collect();
 
@@ -295,6 +301,45 @@ impl Registry {
         }
         g.ladder
             .rank(self.ladder.token(self.models[idx].grade_rank))
+    }
+
+    /// Resolve serving labels on the same ladder used to select a candidate.
+    pub fn grade_for_request<'a>(&'a self, requested: &str, model: &Model) -> (&'a str, usize) {
+        if let Some(g) = self.groups.iter().find(|g| {
+            requested == g.id
+                || requested
+                    .strip_prefix(&format!("{}-", g.id))
+                    .is_some_and(|suffix| g.ladder.parse_request(suffix).is_some())
+        }) {
+            if let Some(rank) = self
+                .models
+                .iter()
+                .position(|m| m.id == model.id)
+                .and_then(|i| self.group_rank(g, i))
+            {
+                return (g.ladder.token(rank), rank);
+            }
+        }
+        (self.ladder.token(model.grade_rank), model.grade_rank)
+    }
+
+    /// Cross-pool fallback keeps the group's grade meanings. Never interpret
+    /// a custom group's numeric rank as a position on the global ladder.
+    pub fn group_fallback_list(
+        &self,
+        profile: &str,
+        g: &Group,
+        req: &GradeRequest,
+        pool: &str,
+    ) -> Vec<&Model> {
+        let ranks = g.ladder.ranks_for(req, None);
+        self.models
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.pools.iter().any(|p| p == pool) && self.visible(m, profile))
+            .filter(|(i, _)| self.group_rank(g, *i).is_some_and(|r| ranks.contains(&r)))
+            .map(|(_, m)| m)
+            .collect()
     }
 
     /// Is the model a member of the group (either membership form)?
@@ -498,6 +543,30 @@ mod tests {
             .expect("registered");
         assert_eq!(m.wire, "gemini");
         assert_eq!(m.base_url, crate::gemini::DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn capabilities_resolve_from_config_table_and_name() {
+        // explicit config adds on top of inferred/table knowledge
+        let mut explicit = m("ollama/qwen3:14b", "B", &["local"], 1.0, (0.0, 0.0));
+        explicit.capabilities = vec!["vision".into()];
+        // table: gemini is multimodal, gemini-3 also reasons
+        let from_table = m(
+            "google/gemini-3.8-flash-low",
+            "A",
+            &["quota"],
+            1.0,
+            (0.0, 0.0),
+        );
+        // name heuristic: `vl` marks a vision model
+        let from_name = m("ollama/qwen2.5vl:7b", "B", &["local"], 1.0, (0.0, 0.0));
+        let r = reg(vec![explicit, from_table, from_name]);
+        let caps = |id: &str| r.models.iter().find(|m| m.id == id).unwrap().capabilities;
+        assert!(caps("ollama/qwen3:14b").contains(crate::capabilities::Capabilities::VISION));
+        let gemini = caps("google/gemini-3.8-flash-low");
+        assert!(gemini.contains(crate::capabilities::Capabilities::VISION));
+        assert!(gemini.contains(crate::capabilities::Capabilities::REASONING));
+        assert!(caps("ollama/qwen2.5vl:7b").contains(crate::capabilities::Capabilities::VISION));
     }
 
     #[test]
@@ -802,32 +871,6 @@ mod tests {
             .map(|m| m.id.as_str())
             .collect();
         assert_eq!(got, vec!["z/super"]);
-    }
-
-    #[test]
-    fn member_group_keeps_same_grade_models_across_pools_together() {
-        let mut cfg = Config::default();
-        cfg.models = vec![
-            m("zai/glm", "A", &["quota"], 1.0, (0.0, 0.0)),
-            m("or/gpt", "A", &["ondemand"], 1.0, (1.0, 4.0)),
-        ];
-        cfg.groups = vec![GroupConfig {
-            id: "arouter-team".into(),
-            pool: None,
-            members: vec!["zai/glm".into(), "or/gpt".into()],
-            grades: BTreeMap::new(),
-            ladder: vec![],
-            fallback: vec![],
-        }];
-        let r = Registry::from_config(&cfg, &ks()).unwrap();
-        let g = r.group("arouter-team").unwrap();
-        let got: Vec<&str> = r
-            .group_attempt_list("default", g, &g.ladder.parse_request("A").unwrap())
-            .iter()
-            .map(|m| m.id.as_str())
-            .collect();
-        assert_eq!(got, vec!["or/gpt", "zai/glm"]);
-        assert_eq!(r.group_rank(g, 0), Some(g.ladder.rank("A").unwrap()));
     }
 
     #[test]

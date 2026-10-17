@@ -865,6 +865,10 @@ async fn handle_chat(
     // (routing.md §1/§3). `pre` keeps every health-ok candidate (even
     // quota-exhausted) so the 429 can quote a reset-aware Retry-After.
     let est = quota::estimate_request(&payload);
+    // Capability-aware routing: an image prompt routes only to multimodal
+    // models, a reasoning_effort only to reasoning models (capabilities
+    // resolved in the registry from config → table → name heuristic).
+    let required = crate::capabilities::required(&payload);
     let qstate = st.quota.current();
     // E10b: token scopes intersect the candidate set BEFORE any
     // ordering (grade sort included) — an out-of-scope model is dropped,
@@ -886,11 +890,37 @@ async fn handle_chat(
         }
         true
     };
+    let effective_ranks: std::collections::BTreeMap<&str, usize> = reg
+        .models
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| match &group_sel {
+            Some((g, _)) => reg.group_rank(g, i).map(|rank| (m.id.as_str(), rank)),
+            None => Some((m.id.as_str(), m.grade_rank)),
+        })
+        .collect();
+    let rank = |m: &Model| {
+        effective_ranks
+            .get(m.id.as_str())
+            .copied()
+            .unwrap_or(usize::MAX)
+    };
+    let origin_pool = pool;
     let build_candidates = |pool: &str| -> (Vec<&Model>, Vec<&Model>) {
-        let mut considered = reg.attempt_list(profile, pool, &req);
+        let mut considered = match &group_sel {
+            Some((g, greq)) if pool == origin_pool => reg.group_attempt_list(profile, g, greq),
+            Some((g, greq)) => reg.group_fallback_list(profile, g, greq, pool),
+            None => reg.attempt_list(profile, pool, &req),
+        };
         if let Some(target) = direct_model {
             considered.retain(|m| m.id == target.id);
         }
+        // Capability filtering applies to the automatic routing path only.
+        // An explicit exact-id pin is "use THIS model": forward and let the
+        // upstream produce its natural error if the request doesn't fit.
+        let enforce_caps = direct_model.is_none();
+        let supports_req =
+            |m: &Model| !enforce_caps || crate::capabilities::supports(m.capabilities, required);
         let scope_excluded: Vec<String> = considered
             .iter()
             .filter(|m| !scope_ok(m))
@@ -912,8 +942,14 @@ async fn handle_chat(
             .filter(|m| !quota::context_fits(m, &est))
             .map(|m| m.id.clone())
             .collect();
+        let capability_excluded: Vec<String> = healthy
+            .iter()
+            .filter(|m| !supports_req(m))
+            .map(|m| m.id.clone())
+            .collect();
         let pre: Vec<&Model> = healthy
             .into_iter()
+            .filter(|m| supports_req(m))
             .filter(|m| quota::context_fits(m, &est))
             .collect();
         // F11: preference resolved ONCE per request — profile overlay
@@ -923,13 +959,14 @@ async fn handle_chat(
             "fastest" => quota::OrderMode::Fastest,
             _ => quota::OrderMode::QuotaPool,
         };
-        let ordered_by_policy = quota::order_candidates(
+        let ordered_by_policy = quota::order_candidates_by_rank(
             &qstate,
             &st.health,
             &rt.provider_map,
             mode,
             &est,
             pre.clone(),
+            rank,
         );
         let quota_excluded: Vec<String> = ordered_by_policy
             .iter()
@@ -945,9 +982,11 @@ async fn handle_chat(
             .collect();
         // E8: residency boost (loaded local models float within their
         // grade), then warm-cache stickiness for the local pool.
-        let mut ordered = crate::localeng::boost_residency(ordered, &st.local.current());
+        let mut ordered =
+            crate::localeng::boost_residency_by_rank(ordered, &st.local.current(), rank);
         if pool == "local" {
-            ordered = crate::localeng::boost_sticky(ordered, &st.sticky, &caller.name);
+            ordered =
+                crate::localeng::boost_sticky_by_rank(ordered, &st.sticky, &caller.name, rank);
         }
         if ordered.is_empty() {
             let pool_models: Vec<String> = reg
@@ -965,112 +1004,15 @@ async fn handle_chat(
                 health_excluded = ?health_excluded,
                 context_excluded = ?context_excluded,
                 quota_excluded = ?quota_excluded,
+                capability_excluded = ?capability_excluded,
+                required_capabilities = ?required.names(),
                 "no eligible candidates in pool"
             );
         }
         (ordered, pre)
     };
 
-    // F13: the same pipeline over a group's membership/ladder. The
-    // quota/health heuristic, residency boost and (for local groups)
-    // warm-cache stickiness all apply unchanged.
-    let build_group = |g: &crate::registry::Group,
-                       greq: &crate::grades::GradeRequest|
-     -> (Vec<&Model>, Vec<&Model>, bool) {
-        let considered = reg.group_attempt_list(profile, g, greq);
-        let scope_excluded: Vec<String> = considered
-            .iter()
-            .filter(|m| !scope_ok(m))
-            .map(|m| m.id.clone())
-            .collect();
-        let scoped: Vec<&Model> = considered.into_iter().filter(|m| scope_ok(m)).collect();
-        let considered_count = scope_excluded.len() + scoped.len();
-        let health_excluded: Vec<String> = scoped
-            .iter()
-            .filter(|m| st.health.is_excluded(&m.id))
-            .map(|m| m.id.clone())
-            .collect();
-        let healthy: Vec<&Model> = scoped
-            .into_iter()
-            .filter(|m| !st.health.is_excluded(&m.id))
-            .collect();
-        let context_excluded: Vec<String> = healthy
-            .iter()
-            .filter(|m| !quota::context_fits(m, &est))
-            .map(|m| m.id.clone())
-            .collect();
-        let pre: Vec<&Model> = healthy
-            .into_iter()
-            .filter(|m| quota::context_fits(m, &est))
-            .collect();
-        let mode = match g.pool.as_deref() {
-            Some(p) => match reg.preference_for(profile, p) {
-                "cheapest" if p == "ondemand" => quota::OrderMode::Cheapest,
-                "fastest" => quota::OrderMode::Fastest,
-                _ => quota::OrderMode::QuotaPool,
-            },
-            None => quota::OrderMode::QuotaPool,
-        };
-        let ordered_by_policy = quota::order_candidates(
-            &qstate,
-            &st.health,
-            &rt.provider_map,
-            mode,
-            &est,
-            pre.clone(),
-        );
-        // A group fallback is a grade fallback: don't consult it if this
-        // group has any usable candidate at the requested grade. This is
-        // evaluated after scope, health, context and quota filtering, so an
-        // exhausted or otherwise ineligible member does not block fallback.
-        let same_grade_available = ordered_by_policy.iter().any(|m| {
-            let idx = reg.models.iter().position(|candidate| candidate.id == m.id);
-            (greq.whole_ladder || idx.and_then(|i| reg.group_rank(g, i)) == Some(greq.ceiling))
-                && (g.pool.as_deref() == Some("local")
-                    || quota::model_available(&qstate, &rt.provider_map, m))
-        });
-        let quota_excluded: Vec<String> = ordered_by_policy
-            .iter()
-            .filter(|m| {
-                g.pool.as_deref() != Some("local")
-                    && !quota::model_available(&qstate, &rt.provider_map, m)
-            })
-            .map(|m| m.id.clone())
-            .collect();
-        let ordered: Vec<&Model> = ordered_by_policy
-            .into_iter()
-            .filter(|m| {
-                g.pool.as_deref() == Some("local")
-                    || quota::model_available(&qstate, &rt.provider_map, m)
-            })
-            .collect();
-        let mut ordered = crate::localeng::boost_residency(ordered, &st.local.current());
-        if g.pool.as_deref() == Some("local") {
-            ordered = crate::localeng::boost_sticky(ordered, &st.sticky, &caller.name);
-        }
-        if ordered.is_empty() {
-            tracing::info!(
-                group = %g.id,
-                candidate_pool = ?g.pool,
-                caller = %caller.name,
-                considered = considered_count,
-                scope_excluded = ?scope_excluded,
-                health_excluded = ?health_excluded,
-                context_excluded = ?context_excluded,
-                quota_excluded = ?quota_excluded,
-                "no eligible candidates in group"
-            );
-        }
-        (ordered, pre, same_grade_available)
-    };
-
-    let (candidates, pre, group_same_grade_available) = match &group_sel {
-        Some((g, greq)) => build_group(g, greq),
-        None => {
-            let (candidates, pre) = build_candidates(pool);
-            (candidates, pre, false)
-        }
-    };
+    let (candidates, pre) = build_candidates(pool);
     let mut final_err: Option<AttemptErr> = None;
     if !candidates.is_empty() {
         match try_candidates(
@@ -1108,11 +1050,6 @@ async fn handle_chat(
             .map(|p| p.fallback.cross_pool.clone())
             .unwrap_or_else(|| reg.base_fallback.cross_pool.clone())
             .unwrap_or_default(),
-    };
-    let cross = if group_same_grade_available {
-        Vec::new()
-    } else {
-        cross
     };
     let fallback_targets = cross.clone();
     for target in cross {
@@ -1187,9 +1124,16 @@ async fn handle_chat(
     if let Some(secs) = retry {
         extra.push((header::RETRY_AFTER, secs.to_string()));
     }
-    let detail = final_err
-        .map(|e| e.last_error)
-        .unwrap_or_else(|| "no candidates".into());
+    let detail = final_err.map(|e| e.last_error).unwrap_or_else(|| {
+        if required.is_empty() {
+            "no candidates".into()
+        } else {
+            format!(
+                "no candidates support required capabilities: {}",
+                required.names().join(", ")
+            )
+        }
+    });
     tracing::warn!(
         requested = %raw_model,
         pool,
@@ -1197,6 +1141,7 @@ async fn handle_chat(
         caller = %caller.name,
         fallback_targets = ?fallback_targets,
         candidates_before_quota = pre.len(),
+        required_capabilities = ?required.names(),
         detail = %detail,
         "request exhausted"
     );
@@ -1477,7 +1422,8 @@ async fn try_candidates(
         };
         match resp {
             Ok(resp) if resp.status().is_success() => {
-                let degraded = m.grade_rank != req.ceiling && !req.whole_ladder;
+                let degraded = rt.registry.grade_for_request(raw_model, m).1 != req.ceiling
+                    && !req.whole_ladder;
                 if harvest {
                     let w = quotaeng::harvest(resp.headers());
                     if !w.is_empty() {
@@ -1770,7 +1716,7 @@ fn record_failure(
         caller: caller.name.clone(),
         project: caller.project.clone(),
         grade_requested: requested.into(),
-        grade_served: rt.registry.ladder.token(m.grade_rank).into(),
+        grade_served: rt.registry.grade_for_request(requested, m).0.into(),
         model: m.id.clone(),
         status: status.into(),
         http_status,
@@ -1924,7 +1870,8 @@ async fn codex_attempt(
             &[(hdr::UPSTREAM, m.id.clone())],
         ));
     }
-    let degraded = m.grade_rank != req.ceiling && !req.whole_ladder;
+    let degraded =
+        rt.registry.grade_for_request(raw_model, m).1 != req.ceiling && !req.whole_ladder;
     let now = unix_now();
     let windows = crate::codex::quota_windows(resp.headers(), now);
     if harvest && !windows.is_empty() {
@@ -2165,7 +2112,8 @@ async fn gemini_attempt(
             &[(hdr::UPSTREAM, m.id.clone())],
         ));
     }
-    let degraded = m.grade_rank != req.ceiling && !req.whole_ladder;
+    let degraded =
+        rt.registry.grade_for_request(raw_model, m).1 != req.ceiling && !req.whole_ladder;
     let now = unix_now();
     if harvest {
         let w = quotaeng::harvest(resp.headers());
@@ -2304,7 +2252,7 @@ async fn relay_success(
     reserve: Option<budget::ReserveGuard>,
 ) -> Response {
     let reg = &rt.registry;
-    let served = reg.ladder.token(m.grade_rank);
+    let served = reg.grade_for_request(requested, m).0;
     let default_ct = if is_stream {
         "text/event-stream"
     } else {
