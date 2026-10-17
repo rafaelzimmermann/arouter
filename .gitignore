@@ -6,4 +6,3 @@ tests/integration/arouter.toml
 __pycache__/
 PLAN.md
 TASKS.md
-docs/
