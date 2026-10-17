@@ -1218,16 +1218,17 @@ async fn try_candidates(
         attempts: 0,
         denials: 0,
     };
+    let max_attempts = rt.cfg.timeouts.max_attempts.max(1);
+    let mut upstream_attempts = 0usize;
     // Role rewrites are per-model (an upstream may reject a role a
     // sibling accepts), so restore the caller's original `messages`
     // before applying each candidate's map — a failed attempt with a
     // mapped payload must not leak into the next candidate.
     let original_messages = payload.get("messages").cloned();
-    for m in candidates
-        .iter()
-        // review F5: bound candidates per request (documented top-3)
-        .take(rt.cfg.timeouts.max_attempts.max(1))
-    {
+    for m in candidates {
+        if upstream_attempts >= max_attempts {
+            break;
+        }
         // Quota can change while this precomputed candidate list is being
         // walked (for example after an upstream wallet-credit 402).
         if !quota::model_available(&st.quota.current(), &rt.provider_map, m) {
@@ -1297,6 +1298,7 @@ async fn try_candidates(
         // E7: native Codex subscription wire — translate to the Codex
         // Responses endpoint under the CLI login, translate back.
         if m.wire == "codex" {
+            upstream_attempts += 1;
             match codex_attempt(
                 st, rt, m, caller, profile, pool, raw_model, req, is_stream, payload, est,
                 cross_from, wire, t0, reserve,
@@ -1326,6 +1328,7 @@ async fn try_candidates(
         // Native Gemini wire — translate to Google's generateContent
         // endpoint (x-goog-api-key auth), translate the response back.
         if m.wire == "gemini" {
+            upstream_attempts += 1;
             match gemini_attempt(
                 st, rt, m, caller, profile, pool, raw_model, req, is_stream, payload, est,
                 cross_from, wire, t0, reserve,
@@ -1365,6 +1368,7 @@ async fn try_candidates(
             .cloned()
             .unwrap_or_else(|| prefix.clone());
         let harvest = rt.quota_harvest.get(&prefix).copied().unwrap_or(true);
+        upstream_attempts += 1;
         // review F5: headers deadline — a connected upstream that never
         // answers fails over instead of hanging the request
         let resp = match tokio::time::timeout(
