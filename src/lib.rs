@@ -64,8 +64,9 @@ pub mod serve {
     pub mod web;
 }
 
-/// Operational commands and state overlay (init/doctor/web.toml).
+/// Operational commands and state overlay (init/doctor/web.toml/admin.toml).
 pub mod ops {
+    pub mod admin;
     pub mod doctor;
     pub mod init;
     pub mod overlay;
@@ -76,7 +77,7 @@ pub mod ops {
 // stable for tests, CLI code, and any external consumer.
 pub use base::{capabilities, catalog, glob, grades};
 pub use money::{budget, tokens, usage};
-pub use ops::{doctor, init, overlay};
+pub use ops::{admin, doctor, init, overlay};
 pub use routing::{discover, registry};
 pub use serve::{metrics, monitor, proxy, web};
 pub use state::{health, localeng, quota, quotaeng};

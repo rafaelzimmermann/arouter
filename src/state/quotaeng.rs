@@ -13,10 +13,12 @@
 //! - `off` — no quota knowledge; routing is health-only for this provider
 //! - `command:<cmd>` — legacy escape hatch (aitop-shaped JSON)
 //!
-//! Everything normalizes into the existing `QuotaWindow` shape, so the
-//! scoring path (drain, pace, scarcity, headroom) is unchanged.
+//! Quota windows normalize into `QuotaWindow`; providers that report an
+//! absolute account balance (DeepSeek) keep that as `ProviderBalance` while
+//! still synthesizing an exhausted window when the provider says the account
+//! is not spendable.
 
-use crate::quota::{unix_now, QuotaWatcher, QuotaWindow};
+use crate::quota::{unix_now, BalanceInfo, ProviderBalance, QuotaWatcher, QuotaWindow};
 use reqwest::header::HeaderMap;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -43,7 +45,29 @@ pub enum SourceKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeKind {
     OpenRouter,
+    DeepSeek,
     Zai,
+}
+
+/// What one native poll returned. Most sources only report quota windows;
+/// DeepSeek additionally reports an absolute account balance.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct NativeSample {
+    pub windows: Vec<QuotaWindow>,
+    pub balance: Option<ProviderBalance>,
+}
+
+impl NativeSample {
+    fn windows(windows: Vec<QuotaWindow>) -> Self {
+        Self {
+            windows,
+            balance: None,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.windows.is_empty() && self.balance.is_none()
+    }
 }
 
 /// Parse a source spec from config (`"headers"`, `"off"`,
@@ -54,6 +78,7 @@ pub fn parse_spec(spec: &str) -> Option<SourceKind> {
         "headers" => Some(SourceKind::Headers),
         "off" => Some(SourceKind::Off),
         "native:openrouter" => Some(SourceKind::Native(NativeKind::OpenRouter)),
+        "native:deepseek" => Some(SourceKind::Native(NativeKind::DeepSeek)),
         "native:zai" => Some(SourceKind::Native(NativeKind::Zai)),
         "manual" => Some(SourceKind::Manual(vec![])), // windows pinned separately
         _ => None,
@@ -128,14 +153,17 @@ pub fn manual_windows(specs: &[crate::config::QuotaManualWindow], now: u64) -> V
 /// the responses it already proxies. Hosts are compared parsed, not by
 /// substring (`notopenrouter.example` must stay `Headers`).
 pub fn auto_kind(base_url: &str) -> SourceKind {
-    let is_or = reqwest::Url::parse(base_url)
+    let host = reqwest::Url::parse(base_url)
         .ok()
-        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
-        .is_some_and(|h| h == "openrouter.ai" || h.ends_with(".openrouter.ai"));
-    if is_or {
-        SourceKind::Native(NativeKind::OpenRouter)
-    } else {
-        SourceKind::Headers
+        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()));
+    match host.as_deref() {
+        Some(h) if h == "openrouter.ai" || h.ends_with(".openrouter.ai") => {
+            SourceKind::Native(NativeKind::OpenRouter)
+        }
+        Some(h) if h == "deepseek.com" || h.ends_with(".deepseek.com") => {
+            SourceKind::Native(NativeKind::DeepSeek)
+        }
+        _ => SourceKind::Headers,
     }
 }
 
@@ -202,10 +230,11 @@ pub async fn fetch_native(
     base_url: &str,
     api_key: Option<&str>,
     http: &reqwest::Client,
-) -> Result<Vec<QuotaWindow>, FetchErr> {
+) -> Result<NativeSample, FetchErr> {
     let key = api_key.ok_or_else(|| FetchErr::Other("no api key configured".into()))?;
     match kind {
         NativeKind::OpenRouter => fetch_openrouter(base_url, key, http).await,
+        NativeKind::DeepSeek => fetch_deepseek(base_url, key, http).await,
         NativeKind::Zai => fetch_zai(base_url, key, http).await,
     }
 }
@@ -215,7 +244,7 @@ async fn fetch_openrouter(
     base_url: &str,
     key: &str,
     http: &reqwest::Client,
-) -> Result<Vec<QuotaWindow>, FetchErr> {
+) -> Result<NativeSample, FetchErr> {
     let url = format!("{}/auth/key", base_url.trim_end_matches('/'));
     let v: serde_json::Value = http
         .get(&url)
@@ -230,7 +259,9 @@ async fn fetch_openrouter(
         .json()
         .await
         .map_err(|e| FetchErr::Other(format!("parse: {e}")))?;
-    parse_openrouter(&v).ok_or_else(|| FetchErr::Other("no usable windows".into()))
+    parse_openrouter(&v)
+        .map(NativeSample::windows)
+        .ok_or_else(|| FetchErr::Other("no usable windows".into()))
 }
 
 /// Pure parse (unit-tested): credits window + optional guardrail budget.
@@ -277,6 +308,94 @@ pub fn parse_openrouter(v: &serde_json::Value) -> Option<Vec<QuotaWindow>> {
     (!windows.is_empty()).then_some(windows)
 }
 
+/// Documented: `GET {host}/user/balance` → absolute account balance.
+/// The endpoint lives at the host root, so a configured `/v1` base URL is
+/// normalized the same way as the z.ai monitor endpoint.
+async fn fetch_deepseek(
+    base_url: &str,
+    key: &str,
+    http: &reqwest::Client,
+) -> Result<NativeSample, FetchErr> {
+    let base =
+        reqwest::Url::parse(base_url).map_err(|e| FetchErr::Other(format!("base url: {e}")))?;
+    let mut url = base;
+    url.set_path("/user/balance");
+    url.set_query(None);
+    let v: serde_json::Value = http
+        .get(url)
+        .bearer_auth(key)
+        .header(reqwest::header::USER_AGENT, USER_AGENT)
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(FetchErr::from_reqwest)?
+        .error_for_status()
+        .map_err(FetchErr::from_reqwest)?
+        .json()
+        .await
+        .map_err(|e| FetchErr::Other(format!("parse: {e}")))?;
+    parse_deepseek_balance(&v).ok_or_else(|| FetchErr::Other("no usable balance".into()))
+}
+
+/// Pure parse (unit-tested): `is_available` plus one entry per currency.
+/// Strings are accepted for the amount fields because DeepSeek reports money
+/// as decimal strings. A non-spendable account gets the synthetic exhausted
+/// window routing already understands.
+pub fn parse_deepseek_balance(v: &serde_json::Value) -> Option<NativeSample> {
+    let is_available = v.get("is_available").and_then(|x| x.as_bool());
+    let infos: Vec<BalanceInfo> = v
+        .get("balance_infos")
+        .and_then(|x| x.as_array())
+        .map(|rows| rows.iter().filter_map(parse_balance_info).collect())
+        .unwrap_or_default();
+    if is_available.is_none() && infos.is_empty() {
+        return None;
+    }
+    let available = is_available.unwrap_or_else(|| infos.iter().any(|b| b.total > 0.0));
+    let drained = !infos.is_empty() && infos.iter().all(|b| b.total <= 0.0);
+    let windows = if !available || drained {
+        vec![QuotaWindow {
+            label: "balance".into(),
+            pct: 100.0,
+            reset_unix: None,
+            pace: None,
+        }]
+    } else {
+        vec![]
+    };
+    Some(NativeSample {
+        windows,
+        balance: Some(ProviderBalance { available, infos }),
+    })
+}
+
+fn parse_balance_info(v: &serde_json::Value) -> Option<BalanceInfo> {
+    let currency = v
+        .get("currency")
+        .and_then(|x| x.as_str())?
+        .trim()
+        .to_ascii_uppercase();
+    if currency.is_empty() {
+        return None;
+    }
+    let total = number(v, "total_balance")?;
+    Some(BalanceInfo {
+        currency,
+        total,
+        granted: number(v, "granted_balance").unwrap_or(0.0),
+        topped_up: number(v, "topped_up_balance").unwrap_or(0.0),
+    })
+}
+
+fn number(v: &serde_json::Value, key: &str) -> Option<f64> {
+    let n = match v.get(key)? {
+        serde_json::Value::Number(n) => n.as_f64()?,
+        serde_json::Value::String(s) => s.trim().parse().ok()?,
+        _ => return None,
+    };
+    n.is_finite().then_some(n)
+}
+
 /// Undocumented (opt-in): `GET {host}/api/monitor/usage/quota/limit` →
 /// per-window used-% and epoch-millis reset. The host is taken from the
 /// model's own base URL — the credential never leaves its provider.
@@ -284,7 +403,7 @@ async fn fetch_zai(
     base_url: &str,
     key: &str,
     http: &reqwest::Client,
-) -> Result<Vec<QuotaWindow>, FetchErr> {
+) -> Result<NativeSample, FetchErr> {
     let base =
         reqwest::Url::parse(base_url).map_err(|e| FetchErr::Other(format!("base url: {e}")))?;
     // The monitor endpoint lives at the host root; any port the model's
@@ -305,7 +424,9 @@ async fn fetch_zai(
         .json()
         .await
         .map_err(|e| FetchErr::Other(format!("parse: {e}")))?;
-    parse_zai(&v).ok_or_else(|| FetchErr::Other("no usable windows".into()))
+    parse_zai(&v)
+        .map(NativeSample::windows)
+        .ok_or_else(|| FetchErr::Other("no usable windows".into()))
 }
 
 /// Pure parse (unit-tested): one window per `data.limits[]` entry.
@@ -488,10 +609,20 @@ pub async fn run_engine(
             match &s.kind {
                 SourceKind::Native(kind) => {
                     match fetch_native(*kind, &s.base_url, s.api_key.as_deref(), &http).await {
-                        Ok(w) if !w.is_empty() => {
+                        Ok(sample) if !sample.is_empty() => {
                             cooldown[i] = 0;
-                            tracing::debug!(provider = %s.prefix, windows = w.len(), "native quota snapshot");
-                            watcher.apply(&s.prefix, w, unix_now());
+                            tracing::debug!(
+                                provider = %s.prefix,
+                                windows = sample.windows.len(),
+                                balance = sample.balance.is_some(),
+                                "native quota snapshot"
+                            );
+                            watcher.apply_native(
+                                &s.prefix,
+                                sample.windows,
+                                sample.balance,
+                                unix_now(),
+                            );
                         }
                         Ok(_) => {}
                         Err(e) => {
@@ -534,6 +665,7 @@ pub fn describe_kind(k: &SourceKind) -> String {
         SourceKind::Headers => "headers".into(),
         SourceKind::Off => "off".into(),
         SourceKind::Native(NativeKind::OpenRouter) => "native:openrouter".into(),
+        SourceKind::Native(NativeKind::DeepSeek) => "native:deepseek".into(),
         SourceKind::Native(NativeKind::Zai) => "native:zai".into(),
         SourceKind::Manual(specs) => format!(
             "manual ({} window{})",
@@ -619,6 +751,66 @@ mod tests {
     }
 
     #[test]
+    fn parses_deepseek_balance_shape() {
+        let v: serde_json::Value = serde_json::json!({
+            "is_available": true,
+            "balance_infos": [{
+                "currency": "usd",
+                "total_balance": "12.34",
+                "granted_balance": "1.00",
+                "topped_up_balance": "11.34"
+            }]
+        });
+        let sample = parse_deepseek_balance(&v).expect("balance sample");
+        assert!(sample.windows.is_empty(), "healthy balance is not a quota");
+        let b = sample.balance.expect("balance info");
+        assert!(b.available);
+        assert_eq!(b.infos.len(), 1);
+        assert_eq!(b.infos[0].currency, "USD");
+        assert!((b.infos[0].total - 12.34).abs() < 1e-9);
+        assert!((b.infos[0].granted - 1.0).abs() < 1e-9);
+        assert!((b.infos[0].topped_up - 11.34).abs() < 1e-9);
+    }
+
+    #[test]
+    fn deepseek_unavailable_marks_balance_exhausted() {
+        let v: serde_json::Value = serde_json::json!({
+            "is_available": false,
+            "balance_infos": [{
+                "currency": "CNY",
+                "total_balance": "0.00",
+                "granted_balance": "0.00",
+                "topped_up_balance": "0.00"
+            }]
+        });
+        let sample = parse_deepseek_balance(&v).expect("balance sample");
+        assert_eq!(sample.windows.len(), 1);
+        assert_eq!(sample.windows[0].label, "balance");
+        assert_eq!(sample.windows[0].pct, 100.0);
+        assert!(!sample.balance.unwrap().available);
+    }
+
+    #[test]
+    fn deepseek_positive_balance_survives_one_zero_currency() {
+        let v: serde_json::Value = serde_json::json!({
+            "is_available": true,
+            "balance_infos": [
+                {"currency": "USD", "total_balance": "0.00"},
+                {"currency": "CNY", "total_balance": 42.0}
+            ]
+        });
+        let sample = parse_deepseek_balance(&v).expect("balance sample");
+        assert!(sample.windows.is_empty());
+        assert_eq!(sample.balance.unwrap().infos.len(), 2);
+    }
+
+    #[test]
+    fn deepseek_invalid_payload_yields_none() {
+        let v: serde_json::Value = serde_json::json!({"unexpected": true});
+        assert!(parse_deepseek_balance(&v).is_none());
+    }
+
+    #[test]
     fn harvests_openrouter_style_trio() {
         let mut h = HeaderMap::new();
         h.insert("x-ratelimit-remaining", "18".parse().unwrap());
@@ -689,6 +881,43 @@ mod tests {
     }
 
     #[test]
+    fn native_balance_replaces_but_harvest_preserves_it() {
+        let w = QuotaWatcher::new(QuotaState::default());
+        let now = unix_now();
+        let balance = ProviderBalance {
+            available: true,
+            infos: vec![BalanceInfo {
+                currency: "USD".into(),
+                total: 5.0,
+                granted: 0.0,
+                topped_up: 5.0,
+            }],
+        };
+        w.apply_native("deepseek", vec![], Some(balance), now);
+        assert_eq!(
+            w.current().providers["deepseek"]
+                .balance
+                .as_ref()
+                .unwrap()
+                .infos[0]
+                .total,
+            5.0
+        );
+        // header harvest updates windows only; the balance snapshot remains
+        w.apply(
+            "deepseek",
+            vec![win("requests", 5.0, Some(now + 60))],
+            now + 1,
+        );
+        let p = &w.current().providers["deepseek"];
+        assert!(p.balance.is_some());
+        assert_eq!(p.windows[0].label, "requests");
+        // a later native sample with no balance clears the old snapshot
+        w.apply_native("deepseek", vec![], None, now + 2);
+        assert!(w.current().providers["deepseek"].balance.is_none());
+    }
+
+    #[test]
     fn apply_upgrades_command_snapshot_provider() {
         // provider first seen via legacy command (updated_unix None)
         let mut qs = QuotaState::default();
@@ -699,6 +928,7 @@ mod tests {
                 error: None,
                 stale: false,
                 windows: vec![win("old", 90.0, None)],
+                balance: None,
                 updated_unix: None,
                 manual_until: None,
             },
@@ -721,6 +951,10 @@ mod tests {
         assert!(matches!(
             resolve(None, "https://openrouter.ai/api/v1", None),
             SourceKind::Native(NativeKind::OpenRouter)
+        ));
+        assert!(matches!(
+            resolve(Some("native:deepseek"), "https://api.deepseek.com/v1", None),
+            SourceKind::Native(NativeKind::DeepSeek)
         ));
         assert!(matches!(
             resolve(None, "https://api.z.ai/api/coding/paas/v4", None),
@@ -754,6 +988,7 @@ mod tests {
             error: None,
             stale: false,
             windows: vec![w],
+            balance: None,
             updated_unix: Some(now),
             manual_until: None,
         };
@@ -775,9 +1010,15 @@ mod tests {
             auto_kind("https://api.openrouter.ai/api/v1"),
             Native(NativeKind::OpenRouter)
         );
+        assert_eq!(
+            auto_kind("https://api.deepseek.com/v1"),
+            Native(NativeKind::DeepSeek)
+        );
         // substring match would wrongly fire here (old impl)
         assert_eq!(auto_kind("https://notopenrouter.ai.example/v1"), Headers);
         assert_eq!(auto_kind("https://openrouter.com.evil.example/v1"), Headers);
+        assert_eq!(auto_kind("https://deepseek.com.evil.example/v1"), Headers);
+        assert_eq!(auto_kind("https://notdeepseek.com/v1"), Headers);
         assert_eq!(auto_kind("http://localhost:8080/v1"), Headers);
     }
 
@@ -870,6 +1111,7 @@ mod tests {
                         reset_unix: None,
                         pace: None,
                     }],
+                    balance: None,
                     updated_unix: None,
                     manual_until: None,
                 },
@@ -899,6 +1141,7 @@ mod tests {
                         reset_unix: None,
                         pace: None,
                     }],
+                    balance: None,
                     updated_unix: None,
                     manual_until: None,
                 },

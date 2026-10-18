@@ -38,11 +38,15 @@ pub fn router(state: AppState) -> Router {
         .route("/status.json", get(status))
         .route("/healthz", get(healthz))
         .route("/metrics", get(metrics_scrape))
-        // E10a web shell — static assets, claim bootstrap, session API
+        // E10a web shell — static assets, admin setup/login, session API
         .route("/", get(crate::web::index))
         .route("/app.js", get(crate::web::app_js))
         .route("/style.css", get(crate::web::style_css))
-        .route("/claim/{token}", get(crate::web::claim))
+        .route(
+            "/api/setup",
+            get(crate::web::api_setup).post(crate::web::api_setup_create),
+        )
+        .route("/api/login", post(crate::web::api_login))
         .route("/api/session", get(crate::web::api_session))
         .route("/api/overview", get(crate::web::api_overview))
         .route("/api/logout", post(crate::web::api_logout))
@@ -269,6 +273,15 @@ async fn status(State(st): State<AppState>, headers: HeaderMap) -> Response {
                         "pct": (w.pct * 1000.0).round() / 1000.0,
                         "reset_in_secs": w.reset_unix.map(|t| t.saturating_sub(now)),
                     })).collect::<Vec<_>>(),
+                    "balance": ps.balance.as_ref().map(|b| serde_json::json!({
+                        "available": b.available,
+                        "infos": b.infos.iter().map(|i| serde_json::json!({
+                            "currency": i.currency,
+                            "total": i.total,
+                            "granted": i.granted,
+                            "topped_up": i.topped_up,
+                        })).collect::<Vec<_>>(),
+                    })),
                 }),
             )
         })
@@ -391,6 +404,101 @@ async fn metrics_scrape(State(st): State<AppState>, headers: HeaderMap) -> Respo
             metrics::H_QUOTA_DRAIN_RESET,
             &[("provider", panel.clone())],
             secs,
+        );
+        if let Some(balance) = &ps.balance {
+            m.gauge_set(
+                metrics::N_PROVIDER_BALANCE_AVAILABLE,
+                metrics::H_PROVIDER_BALANCE_AVAILABLE,
+                &[("provider", panel.clone())],
+                f64::from(u8::from(balance.available)),
+            );
+            for info in &balance.infos {
+                let labels = [
+                    ("provider", panel.clone()),
+                    ("currency", info.currency.clone()),
+                ];
+                m.gauge_set(
+                    metrics::N_PROVIDER_BALANCE,
+                    metrics::H_PROVIDER_BALANCE,
+                    &labels,
+                    info.total,
+                );
+                m.gauge_set(
+                    metrics::N_PROVIDER_BALANCE_GRANTED,
+                    metrics::H_PROVIDER_BALANCE_GRANTED,
+                    &labels,
+                    info.granted,
+                );
+                m.gauge_set(
+                    metrics::N_PROVIDER_BALANCE_TOPPED_UP,
+                    metrics::H_PROVIDER_BALANCE_TOPPED_UP,
+                    &labels,
+                    info.topped_up,
+                );
+            }
+            if let Some(updated) = ps.updated_unix {
+                m.gauge_set(
+                    metrics::N_PROVIDER_BALANCE_TIMESTAMP,
+                    metrics::H_PROVIDER_BALANCE_TIMESTAMP,
+                    &[("provider", panel.clone())],
+                    updated as f64,
+                );
+            }
+        }
+    }
+    // Quota-panel mapping: the dashboard can join registry provider
+    // prefixes (`or`, `zai`, `deepseek`) to aitop panel names (`openrouter`,
+    // `z.ai`, ...) instead of guessing in PromQL.
+    let mut quota_providers = rt.provider_map.explicit.clone();
+    for model in &reg.models {
+        let prefix = model.id.split('/').next().unwrap_or(&model.id);
+        if quota_providers.contains_key(prefix) {
+            continue;
+        }
+        if let Some(ps) = rt.provider_map.resolve(prefix, &q.providers) {
+            quota_providers.insert(prefix.to_string(), ps.panel.clone());
+        }
+    }
+    for (provider, panel) in quota_providers {
+        m.gauge_set(
+            metrics::N_QUOTA_PROVIDER_INFO,
+            metrics::H_QUOTA_PROVIDER_INFO,
+            &[("provider", provider), ("quota_provider", panel)],
+            1.0,
+        );
+    }
+    // Health is computed from in-memory state, so exposing it at scrape
+    // time keeps the metric families bounded to models in the registry.
+    let health = st.health.snapshot();
+    for model in &reg.models {
+        let snap = health.get(&model.id);
+        let state = match snap.map(|s| s.state) {
+            Some(crate::health::HealthState::Cooldown) => 1.0,
+            Some(crate::health::HealthState::CircuitOpen) => 2.0,
+            _ => 0.0,
+        };
+        let cooldown = snap
+            .filter(|s| s.state.excluded())
+            .map(|s| s.secs_left as f64)
+            .unwrap_or(0.0);
+        let fail_ratio = snap.map(|s| s.fail_ratio_1h).unwrap_or(0.0);
+        m.gauge_set(
+            metrics::N_MODEL_HEALTH,
+            metrics::H_MODEL_HEALTH,
+            &[("model", model.id.clone())],
+            state,
+        );
+        m.gauge_set(
+            metrics::N_MODEL_COOLDOWN,
+            metrics::H_MODEL_COOLDOWN,
+            &[("model", model.id.clone())],
+            cooldown,
+        );
+        m.gauge_set(
+            metrics::N_MODEL_FAIL_RATIO,
+            metrics::H_MODEL_FAIL_RATIO,
+            &[("model", model.id.clone())],
+            fail_ratio,
         );
     }
     ([(header::CONTENT_TYPE, METRICS_CONTENT_TYPE)], m.render()).into_response()

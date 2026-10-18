@@ -148,6 +148,26 @@ pub struct QuotaWindow {
     pub pace: Option<Pace>,
 }
 
+/// Absolute account balance reported by a provider (for example DeepSeek's
+/// `/user/balance`). Kept separate from [`QuotaWindow`] because it is an
+/// amount, not a percentage of a resetting allowance.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BalanceInfo {
+    pub currency: String,
+    pub total: f64,
+    pub granted: f64,
+    pub topped_up: f64,
+}
+
+/// One provider's balance snapshot. `available` is the provider's own
+/// spendability flag; an unavailable account also gets a synthetic 100%
+/// `balance` window so routing excludes it like any exhausted quota.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderBalance {
+    pub available: bool,
+    pub infos: Vec<BalanceInfo>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProviderState {
     pub panel: String,
@@ -155,6 +175,8 @@ pub struct ProviderState {
     /// the source says these numbers are the last good ones, not live.
     pub stale: bool,
     pub windows: Vec<QuotaWindow>,
+    /// Absolute balance snapshot (native `native:deepseek` today).
+    pub balance: Option<ProviderBalance>,
     /// E10c: a manual quota override holds this provider until
     /// `expires_at` (unix) or a fresher native/harvest sample replaces
     /// it. `None` = no override in force.
@@ -207,6 +229,7 @@ impl QuotaState {
                     error: p.error,
                     stale: p.stale.unwrap_or(false),
                     windows,
+                    balance: None,
                     updated_unix: None,
                     manual_until: None,
                 },
@@ -474,6 +497,30 @@ impl QuotaWatcher {
     /// header harvest — the whole snapshot is only ever swapped by the
     /// legacy command watcher.
     pub fn apply(&self, provider: &str, windows: Vec<QuotaWindow>, now: u64) {
+        self.apply_inner(provider, windows, None, now);
+    }
+
+    /// Native poller update: replace windows and the absolute balance
+    /// snapshot together. `None` clears a previously reported balance (for
+    /// example after a source switch); header harvests call [`apply`] and
+    /// leave balance untouched.
+    pub fn apply_native(
+        &self,
+        provider: &str,
+        windows: Vec<QuotaWindow>,
+        balance: Option<ProviderBalance>,
+        now: u64,
+    ) {
+        self.apply_inner(provider, windows, Some(balance), now);
+    }
+
+    fn apply_inner(
+        &self,
+        provider: &str,
+        windows: Vec<QuotaWindow>,
+        balance: Option<Option<ProviderBalance>>,
+        now: u64,
+    ) {
         let current = self.current();
         let mut qs = QuotaState::clone(&current);
         let entry = qs
@@ -485,6 +532,7 @@ impl QuotaWatcher {
                 error: None,
                 stale: false,
                 windows: vec![],
+                balance: None,
                 updated_unix: None,
             });
         // The native OpenRouter key endpoint reports key limits, not the
@@ -498,6 +546,9 @@ impl QuotaWatcher {
         entry.windows = windows;
         if let Some(block) = wallet_block {
             entry.windows.push(block);
+        }
+        if let Some(balance) = balance {
+            entry.balance = balance;
         }
         entry.error = None;
         entry.stale = false;
@@ -557,6 +608,7 @@ impl QuotaWatcher {
                 error: None,
                 stale: false,
                 windows: vec![],
+                balance: None,
                 updated_unix: None,
                 manual_until: None,
             });
@@ -950,6 +1002,7 @@ mod tests {
             stale: false,
             updated_unix: None,
             manual_until: None,
+            balance: None,
             windows: pcts_resets
                 .iter()
                 .enumerate()

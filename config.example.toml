@@ -89,9 +89,11 @@ cross_pool = []   # never silently fall into the on-demand pool
 # E3b: quota intake is native — the router asks its upstreams directly.
 # Per provider, resolved in this order:
 #   quota.sources."<prefix>"   explicit: headers | off | native:openrouter |
+#                              native:deepseek (documented /user/balance) |
 #                              native:zai (undocumented endpoint, opt-in) |
 #                              manual | command:<cmd> (legacy escape hatch)
 #   openrouter.ai upstreams    → native:openrouter (documented /auth/key)
+#   deepseek.com upstreams     → native:deepseek (documented /user/balance)
 #   everyone else              → headers: quota learned from x-ratelimit-*
 #                                headers of responses arouter already
 #                                proxies, plus 429 Retry-After (a 429 is
@@ -259,13 +261,15 @@ kind = "auto"                     # auto | ollama | llamacpp
 
 # ─────────────────────────── web interface (E10a) ───────────────────────────
 # Static shell + JSON API on the same listener. There is no default
-# password: at startup the daemon prints
-#     web: claim http://127.0.0.1:3929/claim/<token>
-# The link is single-use and only consumable from loopback; opening it
-# mints an admin session cookie (HttpOnly, SameSite=Strict). Mutating API
-# calls additionally require a same-origin Origin/Host match.
-# Disabling this removes /, /app.js, /style.css, /claim/* and /api/*;
-# the proxy surface (/v1/...) is unaffected.
+# password: the first access asks you to create the admin username and
+# password. The first visitor to an unconfigured router becomes the admin,
+# so finish setup before exposing the port. Credentials are stored as an
+# Argon2id hash in <state_dir>/admin.toml (0600); setup closes permanently
+# once the admin exists. Login sessions use an HttpOnly, SameSite=Strict
+# cookie, and mutating API calls additionally require a same-origin
+# Origin/Host match. Disabling this removes /, /app.js, /style.css,
+# /api/setup, /api/login and /api/*; the proxy surface (/v1/...) is
+# unaffected.
 
 [web]
 enabled = true

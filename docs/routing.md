@@ -106,9 +106,18 @@ paid pool.
 
 Quota signals arrive from:
 
-- native pollers (`native:openrouter`, `native:zai`) for key/admin limits;
+- native pollers (`native:openrouter`, `native:deepseek`, `native:zai`) for
+  key/admin limits and absolute account balances;
 - rate-limit headers and 429 `Retry-After` harvested from real traffic;
 - the legacy external command, or manual windows from the web overlay.
+
+DeepSeek's balance endpoint reports an absolute per-currency balance. It is
+exported as `arouter_provider_balance{provider,currency}` (plus granted,
+topped-up, availability, and fetch timestamp gauges); a non-spendable account
+also produces a synthetic 100% `balance` window so routing excludes it until
+the account is topped up. An explicit `quota.sources."deepseek"` or a
+manual window for that prefix takes precedence and disables the native
+poller.
 
 OpenRouter wallet credits are not visible to the key-limit API. A 402 with
 `error.metadata.limit_source = "openrouter_credits"` records a short

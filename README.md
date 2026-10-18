@@ -52,7 +52,7 @@ For a request that should use one configured upstream directly, send its exact m
 
 **Capability-aware routing.** arouter knows what each model can execute and routes accordingly: a prompt with an image goes only to multimodal models, a `reasoning_effort` only to reasoning models — no hand-built `*-vision` groups needed. Capabilities come from explicit `[[models]].capabilities`, a curated table (`src/base/capabilities.toml`), and a name heuristic, all unioned. When no candidate supports a required capability, the request fails with a clear `no candidates support required capabilities: …` instead of hitting an upstream that can't run it.
 
-**Quota awareness.** arouter asks its upstreams for quota directly: the documented OpenRouter key endpoint by default, `x-ratelimit-*` headers harvested from the responses it already proxies (a 429 is ground truth — exhausted until its `Retry-After` says otherwise), an opt-in fetcher for z.ai coding plans, and hand-pinned windows for providers with no quota API at all. It then scores each provider: exhausted windows are skipped until their reset (arouter's own 429 carries a reset-aware `Retry-After`), scarce windows and too-fast burn rates are deprioritized, equally-healthy providers spread by remaining headroom. Windows resetting within 4h enter **drain mode** — their preservation penalties lift and ties resolve toward the soonest reset. Other windows still constrain routing, so an expiring short allowance cannot override a scarce weekly allowance. Exhausted windows become retryable at their actual reset time; stale samples without reset times become unknown rather than blocking forever (active manual overrides remain enforced). Live numbers: `/status.json` and the `arouter_quota_*` gauges.
+**Quota awareness.** arouter asks its upstreams for quota directly: the documented OpenRouter key endpoint by default, DeepSeek's `/user/balance` endpoint (absolute per-currency balance plus a spendability flag), `x-ratelimit-*` headers harvested from the responses it already proxies (a 429 is ground truth — exhausted until its `Retry-After` says otherwise), an opt-in fetcher for z.ai coding plans, and hand-pinned windows for providers with no quota API at all. It then scores each provider: exhausted windows are skipped until their reset (arouter's own 429 carries a reset-aware `Retry-After`), scarce windows and too-fast burn rates are deprioritized, equally-healthy providers spread by remaining headroom. Windows resetting within 4h enter **drain mode** — their preservation penalties lift and ties resolve toward the soonest reset. Other windows still constrain routing, so an expiring short allowance cannot override a scarce weekly allowance. Exhausted windows become retryable at their actual reset time; stale samples without reset times become unknown rather than blocking forever (active manual overrides remain enforced). Live numbers: `/status.json`, the `arouter_quota_*` gauges, and `arouter_provider_balance*` for absolute balances.
 
 **Request estimates.** Context and cost estimates include message content blocks, tool calls/results, tool schemas, and output schemas. They use serialized bytes divided by four, so they remain estimates rather than model-specific token counts.
 
@@ -69,7 +69,7 @@ arouter monitor          # htop-style TUI: provider LEDs with reset countdowns,
                          # per-model quota bars, tok/s, 24h sparklines, spend
 ```
 
-`/metrics` speaks Prometheus (requests, tokens, $ spend, latency/TTFB histograms, quota windows, drain countdown — all labeled by caller/pool/grade). Import [contrib/grafana-dashboard.json](contrib/grafana-dashboard.json), or run the whole stack:
+`/metrics` speaks Prometheus (requests, tokens, $ spend, latency/TTFB histograms, quota windows, provider account balances, drain countdown, model health/cooldowns — with native `model`/`provider` labels on usage and latency series). Import [contrib/grafana-dashboard.json](contrib/grafana-dashboard.json), or run the whole stack (Prometheus also loads [alert/recording rules](contrib/observability/prometheus/rules/arouter.yml)):
 
 `arouter_requests_total` uses `status` for outcomes (`ok`, `upstream_error`, `exhausted`, …), not HTTP codes. `source_model` is the client request and `target_model` is the upstream model selected (`none` when routing exhausted); `event="request"` excludes individual retry attempts. Filter HTTP errors with `http_status`:
 
@@ -127,17 +127,25 @@ anonymous: unknown/revoked → `401`, out-of-scope group → `403
 ## Web interface
 
 arouter serves a small web UI on the same port (`/`). There is no default
-password: at startup the daemon prints a claim link under the banner.
+password: the first access to an unconfigured router asks you to create the
+admin username and password.
 
 ```
-web: claim http://127.0.0.1:3929/claim/<token>
+web: no admin configured — first visitor can create one at http://127.0.0.1:3929/
 ```
 
-Open it on the machine running the daemon. The link is **single-use and
-loopback-only**; consuming it starts an admin session (`HttpOnly`,
-`SameSite=Strict` cookie, 12h by default). Reads are gated too — the JSON
-API under `/api/*` returns 401 without a session, and every write must be
-same-origin. Disable the whole surface with `[web] enabled = false`.
+The first visitor to an unconfigured router becomes the admin, so finish setup
+before exposing the port. The credential is stored as an **Argon2id hash** in
+`<state_dir>/admin.toml` (mode `0600`); the plaintext is never written to disk.
+Setup closes permanently once the admin exists. If `admin.toml` exists but
+cannot be read or parsed, setup stays closed and login returns `503` until the
+file is repaired or removed.
+
+Later visits ask for username/password and start an admin session
+(`HttpOnly`, `SameSite=Strict` cookie, 12h by default). Reads are gated too —
+the JSON API under `/api/*` returns 401 without a session, and every write
+must be same-origin. Repeated failed logins are throttled in memory. Disable
+the whole surface with `[web] enabled = false`.
 
 ```toml
 [web]

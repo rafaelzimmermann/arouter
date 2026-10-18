@@ -359,9 +359,12 @@ async fn serve(
         );
     }
 
-    // E10a: web shell state. The claim token is minted per start and never
-    // persisted — an old link dies with the old process.
-    let web = std::sync::Arc::new(arouter::web::Web::new(&cfg.web));
+    // E10a: web shell state. Admin credentials live in state_dir/admin.toml;
+    // sessions themselves remain in memory.
+    let web = std::sync::Arc::new(arouter::web::Web::new(
+        &cfg.web,
+        std::path::Path::new(&cfg.server.state_dir),
+    ));
 
     let state = proxy::AppState {
         runtime: reloader.shared.clone(),
@@ -433,10 +436,22 @@ async fn serve(
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     print_banner(&bind, registry.models.len());
     if cfg.web.enabled {
-        if let Some(token) = web.claim_token() {
-            // loopback-only, single-use — printed so the operator can
-            // bootstrap an admin session without a default password
-            println!("web: claim {}", arouter::web::claim_url(&bind, &token));
+        if web.setup_locked() {
+            println!(
+                "web: admin credentials unreadable — fix {} and restart",
+                arouter::admin::path_for(std::path::Path::new(&cfg.server.state_dir)).display()
+            );
+        } else if web.setup_required() {
+            // any first visitor can create the admin: say so loudly
+            println!(
+                "web: no admin configured — first visitor can create one at {}",
+                arouter::web::web_url(&bind)
+            );
+        } else if let Some(user) = web.admin_username() {
+            println!(
+                "web: admin {user:?} configured — sign in at {}",
+                arouter::web::web_url(&bind)
+            );
         }
     }
     tracing::info!(
@@ -471,7 +486,7 @@ async fn serve(
 
     let reload_task = tokio::spawn(reload_loop(reloader));
     let app = proxy::router(state);
-    // connect info feeds the claim's loopback check
+    // connect info feeds the login throttle's per-peer key
     let server = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),

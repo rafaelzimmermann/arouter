@@ -9,6 +9,7 @@ authors = ["Rafael Zimmermann"]
 
 [dependencies]
 anyhow = "1"
+argon2 = "0.5"
 axum = "0.8"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"

@@ -69,6 +69,7 @@ services:
     command: ["--config.file=/etc/prometheus/prometheus.yml"]
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../../contrib/observability/prometheus/rules:/etc/prometheus/rules:ro
     ports: ["${RIG_PROM_PORT:-9090}:9090"]
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]

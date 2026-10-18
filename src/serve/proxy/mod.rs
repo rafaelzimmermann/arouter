@@ -144,7 +144,7 @@ pub struct AppState {
     pub sticky: Arc<crate::localeng::StickyMap>,
     pub http: reqwest::Client,
     pub started: Instant,
-    /// E10a web shell: sessions + claim bootstrap.
+    /// E10a web shell: sessions + first-access admin setup.
     pub web: Arc<crate::web::Web>,
     /// E10b API tokens (`ark_…`): hashed store, scopes narrow routing.
     pub tokens: Arc<crate::tokens::TokenStore>,

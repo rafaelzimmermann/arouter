@@ -1,0 +1,95 @@
+# Prometheus recording and alerting rules for arouter.
+#
+# Thresholds are deliberately conservative starting points; tune them to
+# the deployment's traffic and budget. The live observability stack loads
+# this directory through prometheus.yml's rule_files glob.
+groups:
+  - name: arouter-recording
+    interval: 30s
+    rules:
+      - record: arouter:request_error_ratio_5m
+        expr: |
+          sum(rate(arouter_requests_total{event="request",http_status=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(arouter_requests_total{event="request"}[5m])), 1e-9)
+      - record: arouter:request_rate_5m
+        expr: sum(rate(arouter_requests_total{event="request"}[5m]))
+      - record: arouter:spend_usd_per_hour
+        expr: sum(rate(arouter_cost_usd_total[5m])) * 3600
+      - record: arouter:spend_usd_24h
+        expr: sum(increase(arouter_cost_usd_total[24h]))
+
+  - name: arouter-alerts
+    interval: 30s
+    rules:
+      - alert: ArouterTargetDown
+        expr: up{job="arouter"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "arouter metrics target is down"
+          description: "Prometheus has not scraped {{ $labels.instance }} for 5 minutes."
+
+      - alert: ArouterHighErrorRate
+        expr: arouter:request_error_ratio_5m > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "arouter 5xx rate is above 5%"
+          description: "5xx ratio over 5m is {{ $value | humanizePercentage }}; inspect upstream attempts and failover."
+
+      - alert: ArouterQuotaStale
+        expr: max by (provider) (arouter_quota_stale) == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Quota data for {{ $labels.provider }} is stale"
+          description: "No fresh native, header-harvested, or manual quota sample has landed for 15 minutes; routing may be using old limits."
+
+      - alert: ArouterQuotaExhausted
+        expr: max by (provider) (arouter_quota_window_pct) >= 100
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "Quota window exhausted for {{ $labels.provider }}"
+          description: "At least one quota window is at 100%; requests will fall back to other pools/providers."
+
+      - alert: ArouterProviderBalanceUnavailable
+        expr: max by (provider) (arouter_provider_balance_available) == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Provider balance unavailable for {{ $labels.provider }}"
+          description: "The provider reports its account as non-spendable; routing should be excluding it until the balance is topped up."
+
+      - alert: ArouterModelCircuitOpen
+        expr: max by (model) (arouter_model_health) >= 2
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Circuit open for {{ $labels.model }}"
+          description: "The model has been excluded from routing; check upstream health and fail ratio."
+
+      - alert: ArouterDegradedServing
+        expr: sum(increase(arouter_requests_degraded_total[1h])) > 5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sustained grade degradation"
+          description: "More than 5 requests were served below the requested grade in the last hour."
+
+      - alert: ArouterSpendVelocityHigh
+        expr: arouter:spend_usd_per_hour > 5
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Spend rate is above $5/hour"
+          description: "Current burn is ${{ $value }}/hour; adjust the threshold or investigate the traffic mix."

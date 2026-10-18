@@ -257,22 +257,113 @@ $("qovform").addEventListener("submit", async (ev) => {
   renderModels();
 });
 
+function authError(id, message) {
+  const el = $(id);
+  if (!message) {
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  el.hidden = false;
+  el.textContent = "error: " + message;
+}
+
+function showAuth(mode, note) {
+  $("panel").hidden = true;
+  $("who").textContent = "";
+  $("login").hidden = false;
+  $("setup-form").hidden = true;
+  $("login-form").hidden = true;
+  $("auth-locked").hidden = true;
+  authError("setup-error");
+  authError("login-error");
+  $("auth-note").hidden = !note;
+  $("auth-note").textContent = note || "";
+  if (mode === "setup") {
+    $("auth-title").textContent = "create admin";
+    $("setup-form").hidden = false;
+    $("setup-user").focus();
+  } else if (mode === "login") {
+    $("auth-title").textContent = "sign in";
+    $("login-form").hidden = false;
+    $("login-user").focus();
+  } else {
+    $("auth-title").textContent = "admin unavailable";
+    $("auth-locked").hidden = false;
+    $("auth-locked").textContent =
+      "The credential file exists but cannot be read. Repair or remove " +
+      "admin.toml in the state directory, then restart arouter.";
+  }
+}
+
 async function refresh() {
   $("host").textContent = location.host;
   const s = await api("/api/session");
   if (s.status !== 200) {
-    $("panel").hidden = true;
-    $("login").hidden = false;
-    $("who").textContent = "";
+    const setup = await api("/api/setup");
+    if (setup.status === 200 && setup.body.locked) {
+      showAuth("locked");
+    } else if (setup.status === 200 && setup.body.required) {
+      showAuth("setup", "No admin exists yet.");
+    } else {
+      showAuth("login", "Sign in with the admin account.");
+    }
     return;
   }
-  $("who").textContent = s.body.role + " · expires in " +
+  $("who").textContent = s.body.username + " · " + s.body.role +
+    " · expires in " +
     Math.max(0, Math.round((s.body.expires_unix - Date.now() / 1000) / 60)) + "m";
   const o = await api("/api/overview");
   if (o.status === 200) renderOverview(o.body);
   renderTokens();
   renderModels();
 }
+
+$("setup-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  authError("setup-error");
+  const username = $("setup-user").value.trim();
+  const password = $("setup-pass").value;
+  const confirm = $("setup-pass2").value;
+  if (password.length < 12) {
+    authError("setup-error", "password must be at least 12 characters");
+    return;
+  }
+  if (password !== confirm) {
+    authError("setup-error", "passwords do not match");
+    return;
+  }
+  const r = await api("/api/setup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: username, password: password }),
+  });
+  if (r.status !== 201) {
+    authError("setup-error", (r.body.error && r.body.error.message) || r.status);
+    return;
+  }
+  $("setup-form").reset();
+  await refresh();
+});
+
+$("login-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  authError("login-error");
+  const r = await api("/api/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      username: $("login-user").value.trim(),
+      password: $("login-pass").value,
+    }),
+  });
+  if (r.status !== 200) {
+    authError("login-error", (r.body.error && r.body.error.message) || r.status);
+    return;
+  }
+  $("login-form").reset();
+  await refresh();
+});
 
 $("logout").addEventListener("click", async () => {
   // Origin/Host are checked server-side; a same-origin POST carries them.

@@ -77,7 +77,8 @@ ignores spoofable identity headers. Observation endpoints (`/status.json`,
 ## Metrics
 
 `metrics.rs` maintains request, token, cost and latency counters plus
-gauges for models, quota windows, health and in-flight requests. Usage is
+gauges for models, quota windows, provider account balances, health and
+in-flight requests. Usage is
 recorded per model and per caller/project in `usage.rs` (JSONL audit log
 plus a bounded in-memory ring for budget windows). Prometheus renders at
 `/metrics`; `/status.json` exposes the same state as JSON.

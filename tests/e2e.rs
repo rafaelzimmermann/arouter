@@ -10,7 +10,7 @@ use arouter::config::{
 use arouter::health::{Health, HealthPolicy};
 use arouter::metrics::Metrics;
 use arouter::proxy;
-use arouter::quota::{self, ProviderState, QuotaState, QuotaWatcher};
+use arouter::quota::{self, BalanceInfo, ProviderBalance, ProviderState, QuotaState, QuotaWatcher};
 use arouter::registry::Registry;
 use arouter::usage::UsageLog;
 use axum::body::Body;
@@ -19,7 +19,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::Router;
 use http_body_util::BodyExt;
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -149,7 +148,7 @@ struct TestApp {
     sticky: Arc<arouter::localeng::StickyMap>,
     /// handle onto the swappable runtime snapshot (F6 tests)
     runtime: Arc<RwLock<Arc<proxy::Runtime>>>,
-    /// E10 web sessions (claim/session/CSRF tests)
+    /// E10 web sessions (setup/login/CSRF tests)
     web: Arc<arouter::web::Web>,
     /// E10b api tokens (scope/revocation tests)
     tokens: Arc<arouter::tokens::TokenStore>,
@@ -185,7 +184,7 @@ fn test_app_health_quota(cfg: Config, policy: HealthPolicy, quota_state: QuotaSt
     let runtime = Arc::new(RwLock::new(Arc::new(
         proxy::Runtime::build(cfg, &keys).unwrap(),
     )));
-    let web = Arc::new(arouter::web::Web::new(&web_cfg));
+    let web = Arc::new(arouter::web::Web::new(&web_cfg, &dir));
     let tokens = Arc::new(arouter::tokens::TokenStore::open(dir.to_str().unwrap()).unwrap());
     let state = proxy::AppState {
         runtime: runtime.clone(),
@@ -387,16 +386,7 @@ async fn failover_on_retryable_500() {
     assert!(m.contains("status=\"ok\""));
 }
 
-// ─────────────────── E10a: web sessions + claim ───────────────────
-
-/// Wrap the app so handlers see a peer address (normally supplied by
-/// `into_make_service_with_connect_info`).
-fn app_with_peer(app: &Router, peer: &str) -> Router {
-    use axum::extract::ConnectInfo;
-    app.clone().layer(axum::Extension(ConnectInfo(
-        peer.parse::<SocketAddr>().unwrap(),
-    )))
-}
+// ─────────────────── E10a: web sessions + admin setup ───────────────────
 
 async fn web_get(app: &Router, path: &str, headers: HeaderMap) -> Response {
     let mut req = Request::get(path).body(Body::empty()).unwrap();
@@ -450,6 +440,12 @@ async fn web_shell_is_static_but_api_needs_a_session() {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{api}");
     }
 
+    // setup state is public; the old claim route is gone
+    let resp = web_get(&t.app, "/api/setup", HeaderMap::new()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = web_get(&t.app, "/claim/deadbeef", HeaderMap::new()).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
     // a bogus cookie is not a session
     let mut h = HeaderMap::new();
     h.insert(
@@ -460,29 +456,64 @@ async fn web_shell_is_static_but_api_needs_a_session() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
+fn origin_headers() -> HeaderMap {
+    let mut h = HeaderMap::new();
+    h.insert(header::ORIGIN, "http://127.0.0.1:3929".parse().unwrap());
+    h.insert(header::HOST, "127.0.0.1:3929".parse().unwrap());
+    h
+}
+
+async fn json_body(resp: Response) -> serde_json::Value {
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
 #[tokio::test]
-async fn web_claim_is_loopback_only_single_use_and_grants_admin() {
+async fn web_setup_creates_admin_once_then_login_works() {
     let cfg = Config::default();
     let t = test_app(cfg);
-    let token = t.web.claim_token().expect("fresh claim");
 
-    // remote peers cannot claim, even with the exact token
-    let remote = app_with_peer(&t.app, "192.168.50.9:51000");
-    let resp = web_get(&remote, &format!("/claim/{token}"), HeaderMap::new()).await;
+    // first access advertises setup
+    let resp = web_get(&t.app, "/api/setup", HeaderMap::new()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = json_body(resp).await;
+    assert_eq!(body["required"], true);
+    assert_eq!(body["allowed"], true);
+    assert_eq!(body["locked"], false);
+
+    // short passwords are rejected before anything is persisted
+    let h = origin_headers();
+    let resp = post_json(
+        &t.app,
+        "/api/setup",
+        &h,
+        serde_json::json!({"username": "alice", "password": "short"}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // cross-origin setup is rejected even when no admin exists
+    let mut bad = h.clone();
+    bad.insert(header::ORIGIN, "http://evil.example".parse().unwrap());
+    let resp = post_json(
+        &t.app,
+        "/api/setup",
+        &bad,
+        serde_json::json!({"username": "alice", "password": "correct horse battery"}),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
-    // a wrong token from loopback cannot claim either
-    let local = app_with_peer(&t.app, "127.0.0.1:51000");
-    let resp = web_get(&local, "/claim/deadbeef", HeaderMap::new()).await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    assert!(t.web.claim_token().is_some(), "still unclaimed");
-
-    // loopback + exact token: 303 to / with the session cookie
-    let resp = web_get(&local, &format!("/claim/{token}"), HeaderMap::new()).await;
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    assert_eq!(resp.headers().get(header::LOCATION).unwrap(), "/");
+    // first valid setup wins and starts a session immediately
+    let resp = post_json(
+        &t.app,
+        "/api/setup",
+        &h,
+        serde_json::json!({"username": " alice ", "password": "correct horse battery"}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
     let cookie = cookie_of(&resp).expect("session cookie");
-    assert!(cookie.starts_with("arouter_sid="));
     let set_cookie = resp
         .headers()
         .get(header::SET_COOKIE)
@@ -492,25 +523,72 @@ async fn web_claim_is_loopback_only_single_use_and_grants_admin() {
         .to_string();
     assert!(set_cookie.contains("HttpOnly"), "{set_cookie}");
     assert!(set_cookie.contains("SameSite=Strict"), "{set_cookie}");
-
-    // the link is dead now — a replay does nothing
-    let resp = web_get(&local, &format!("/claim/{token}"), HeaderMap::new()).await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-
-    // …and the session works for reads
-    let mut h = HeaderMap::new();
-    h.insert(header::COOKIE, HeaderValue::from_str(&cookie).unwrap());
-    let resp = web_get(&t.app, "/api/session", h.clone()).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body: serde_json::Value =
-        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let body = json_body(resp).await;
+    assert_eq!(body["username"], "alice");
     assert_eq!(body["role"], "admin");
 
-    let resp = web_get(&t.app, "/api/overview", h).await;
+    // setup is permanently closed
+    let resp = post_json(
+        &t.app,
+        "/api/setup",
+        &h,
+        serde_json::json!({"username": "bob", "password": "another password"}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let resp = web_get(&t.app, "/api/setup", HeaderMap::new()).await;
+    let body = json_body(resp).await;
+    assert_eq!(body["required"], false);
+    assert_eq!(body["allowed"], false);
+
+    // the session works and names the user
+    let mut session_headers = HeaderMap::new();
+    session_headers.insert(header::COOKIE, HeaderValue::from_str(&cookie).unwrap());
+    let resp = web_get(&t.app, "/api/session", session_headers.clone()).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    let body: serde_json::Value =
-        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert!(body["models"].as_u64().is_some());
+    let body = json_body(resp).await;
+    assert_eq!(body["role"], "admin");
+    assert_eq!(body["username"], "alice");
+
+    let resp = web_get(&t.app, "/api/overview", session_headers).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // logout, then wrong and correct password paths
+    let resp = post_json(&t.app, "/api/logout", &h, serde_json::json!({})).await;
+    // logout needs the session cookie too
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let mut logout_headers = h.clone();
+    logout_headers.insert(header::COOKIE, HeaderValue::from_str(&cookie).unwrap());
+    let resp = post_json(
+        &t.app,
+        "/api/logout",
+        &logout_headers,
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = post_json(
+        &t.app,
+        "/api/login",
+        &h,
+        serde_json::json!({"username": "alice", "password": "wrong"}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let resp = post_json(
+        &t.app,
+        "/api/login",
+        &h,
+        serde_json::json!({"username": "alice", "password": "correct horse battery"}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cookie = cookie_of(&resp).expect("login cookie");
+    let mut h2 = HeaderMap::new();
+    h2.insert(header::COOKIE, HeaderValue::from_str(&cookie).unwrap());
+    let resp = web_get(&t.app, "/api/session", h2).await;
+    assert_eq!(resp.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -1539,12 +1617,21 @@ async fn web_disabled_hides_the_whole_surface() {
         "/",
         "/app.js",
         "/style.css",
+        "/api/setup",
         "/api/session",
         "/api/overview",
     ] {
         let resp = web_get(&t.app, path, HeaderMap::new()).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{path}");
     }
+    let resp = post_json(
+        &t.app,
+        "/api/login",
+        &origin_headers(),
+        serde_json::json!({"username": "a", "password": "b"}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "/api/login");
 }
 
 #[tokio::test]
@@ -1942,12 +2029,16 @@ async fn prometheus_metrics_endpoint() {
     let m = body_string(resp).await;
     assert!(m.contains("# TYPE arouter_requests_total counter"));
     assert!(m.contains(
-        "arouter_requests_total{caller=\"alice\",event=\"request\",grade_requested=\"A\",grade_served=\"A\",http_status=\"200\",model=\"zai/glm-5.2\",pool=\"quota\",profile=\"default\",project=\"arouter\",source_model=\"A\",status=\"ok\",target_model=\"zai/glm-5.2\"} 1"
+        "arouter_requests_total{caller=\"alice\",event=\"request\",grade_requested=\"A\",grade_served=\"A\",http_status=\"200\",model=\"zai/glm-5.2\",pool=\"quota\",profile=\"default\",project=\"arouter\",provider=\"zai\",source_model=\"A\",status=\"ok\",target_model=\"zai/glm-5.2\"} 1"
     ));
     assert!(m.contains("status=\"exhausted\""));
     assert!(m.contains("arouter_tokens_total{caller=\"alice\",direction=\"in\""));
     assert!(m.contains("arouter_cost_usd_total{caller=\"alice\""));
     assert!(m.contains("# TYPE arouter_request_duration_seconds histogram"));
+    assert!(m.contains("# TYPE arouter_model_health gauge"));
+    assert!(m.contains("arouter_model_health{model=\"zai/glm-5.2\"} 0"));
+    assert!(m.contains("# TYPE arouter_model_cooldown_secs gauge"));
+    assert!(m.contains("# TYPE arouter_model_fail_ratio_1h gauge"));
     assert!(m.contains("arouter_requests_in_flight 0\n"));
     assert!(m.contains("arouter_uptime_seconds"));
     assert!(m.contains("arouter_models{grade=\"A\",pool=\"quota\",profile=\"default\"} 1"));
@@ -2171,6 +2262,7 @@ fn quota_state_exhausted(provider: &str, reset_in_secs: u64) -> QuotaState {
             stale: false,
             updated_unix: None,
             manual_until: None,
+            balance: None,
             windows: vec![quota::QuotaWindow {
                 label: "5h window".into(),
                 pct: 100.0,
@@ -2248,6 +2340,7 @@ async fn draining_provider_takes_matching_requests() {
                     stale: false,
                     updated_unix: None,
                     manual_until: None,
+                    balance: None,
                     windows: vec![quota::QuotaWindow {
                         label: "weekly".into(),
                         pct: 76.0,
@@ -2264,6 +2357,7 @@ async fn draining_provider_takes_matching_requests() {
                     stale: false,
                     updated_unix: None,
                     manual_until: None,
+                    balance: None,
                     windows: vec![quota::QuotaWindow {
                         label: "5h window".into(),
                         pct: 50.0,
@@ -2360,6 +2454,78 @@ async fn status_json_exposes_quota_section_and_metrics_gauges() {
         "gauge missing: {body}"
     );
     assert!(body.contains("arouter_quota_stale{provider=\"prov\"} 0"));
+}
+
+#[tokio::test]
+async fn deepseek_balance_exposed_in_status_and_metrics() {
+    let up = good_json().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![model(
+        "deepseek/deepseek-v4",
+        "A",
+        &["quota"],
+        &up,
+        1.0,
+        (0.0, 0.0),
+    )];
+    let now = quota::unix_now();
+    let mut qs = QuotaState {
+        fetched_unix: Some(now),
+        ..QuotaState::default()
+    };
+    qs.providers.insert(
+        "deepseek".into(),
+        ProviderState {
+            panel: "deepseek".into(),
+            error: None,
+            stale: false,
+            windows: vec![],
+            balance: Some(ProviderBalance {
+                available: true,
+                infos: vec![BalanceInfo {
+                    currency: "USD".into(),
+                    total: 12.34,
+                    granted: 1.0,
+                    topped_up: 11.34,
+                }],
+            }),
+            updated_unix: Some(now),
+            manual_until: None,
+        },
+    );
+    let t = test_app_quota(cfg, qs);
+
+    let resp = t
+        .app
+        .clone()
+        .oneshot(Request::get("/status.json").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    let b = &v["quota"]["providers"]["deepseek"]["balance"];
+    assert_eq!(b["available"], serde_json::json!(true));
+    assert_eq!(b["infos"][0]["currency"], "USD");
+    assert!((b["infos"][0]["total"].as_f64().unwrap() - 12.34).abs() < 1e-9);
+
+    let resp = t
+        .app
+        .clone()
+        .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let m = body_string(resp).await;
+    assert!(
+        m.contains("arouter_provider_balance{currency=\"USD\",provider=\"deepseek\"} 12.34"),
+        "balance gauge missing: {m}"
+    );
+    assert!(
+        m.contains("arouter_provider_balance_granted{currency=\"USD\",provider=\"deepseek\"} 1")
+    );
+    assert!(m.contains(
+        "arouter_provider_balance_topped_up{currency=\"USD\",provider=\"deepseek\"} 11.34"
+    ));
+    assert!(m.contains("arouter_provider_balance_available{provider=\"deepseek\"} 1"));
+    assert!(m.contains("arouter_provider_balance_timestamp_seconds{provider=\"deepseek\"}"));
 }
 
 // ─────────────────────────── E4: budgets & cross-pool ───────────────────────────

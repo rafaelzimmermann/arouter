@@ -15,16 +15,34 @@
 
 <main>
   <section id="login" hidden>
-    <h1>not signed in</h1>
-    <p class="dim">
-      arouter has no default password. Start it, then open the claim link it
-      prints under the startup banner:
-    </p>
-    <pre class="cmd">web: claim http://127.0.0.1:3929/claim/…</pre>
-    <p class="dim">
-      The link works once, from the machine the daemon runs on. This page is a
-      static shell — reload it after claiming.
-    </p>
+    <h1 id="auth-title">sign in</h1>
+    <p id="auth-note" class="dim"></p>
+
+    <form id="setup-form" class="authform" hidden>
+      <p class="dim">
+        No admin exists yet. Create the account that can manage tokens,
+        models and quota. The first visitor to an unconfigured router
+        becomes the admin, so finish this before exposing the port.
+      </p>
+      <input id="setup-user" placeholder="admin username" autocomplete="username"
+             required maxlength="64">
+      <input id="setup-pass" type="password" placeholder="password (min 12 characters)"
+             autocomplete="new-password" required minlength="12">
+      <input id="setup-pass2" type="password" placeholder="confirm password"
+             autocomplete="new-password" required minlength="12">
+      <button>create admin</button>
+      <pre id="setup-error" class="cmd bad" hidden></pre>
+    </form>
+
+    <form id="login-form" class="authform" hidden>
+      <input id="login-user" placeholder="username" autocomplete="username" required>
+      <input id="login-pass" type="password" placeholder="password"
+             autocomplete="current-password" required>
+      <button>sign in</button>
+      <pre id="login-error" class="cmd bad" hidden></pre>
+    </form>
+
+    <pre id="auth-locked" class="cmd bad" hidden></pre>
   </section>
 
   <section id="panel" hidden>

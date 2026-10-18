@@ -250,14 +250,14 @@ pub struct Config {
     pub groups: Vec<GroupConfig>,
     pub auth: AuthConfig,
     pub callers: Vec<CallerConfig>,
-    /// E10a web interface: static shell, sessions, claim bootstrap.
+    /// E10a web interface: static shell, sessions, first-access admin setup.
     #[serde(default)]
     pub web: WebConfig,
 }
 
-/// `[web]` — the web shell and its session policy (review: "sessions/claim
-/// first"). Disabling it removes `/`, `/app.js`, `/style.css`, `/claim/*`
-/// and `/api/*`; the proxy surface is unaffected either way.
+/// `[web]` — the web shell and its session policy (review: "sessions
+/// first"). Disabling it removes `/`, `/app.js`, `/style.css`, `/api/setup`,
+/// `/api/login` and `/api/*`; the proxy surface is unaffected either way.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct WebConfig {
@@ -858,7 +858,7 @@ impl Config {
         let mut seen_callers = std::collections::HashSet::new();
         // E10b: `auth.require = true` no longer demands a [[callers]]
         // entry — minted `ark_…` tokens satisfy auth on their own, and
-        // the loopback claim still bootstraps the admin if none exist.
+        // the web setup flow creates the admin if none exists.
         for c in &self.callers {
             if c.name.is_empty() {
                 return Err("caller name must not be empty".into());
@@ -1425,8 +1425,7 @@ base_url = "https://x"
         assert_eq!(map.len(), 2);
 
         // require with no callers is VALID since E10b — minted `ark_…`
-        // tokens satisfy auth on their own and the loopback claim still
-        // bootstraps the admin
+        // tokens satisfy auth on their own and web setup creates the admin
         let mut cfg = Config::default();
         cfg.auth.require = true;
         cfg.validate().unwrap();

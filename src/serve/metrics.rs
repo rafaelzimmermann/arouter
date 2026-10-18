@@ -41,6 +41,33 @@ pub const H_QUOTA_DRAIN_RESET: &str =
 pub const N_QUOTA_WINDOW: &str = "arouter_quota_window_pct";
 pub const N_QUOTA_STALE: &str = "arouter_quota_stale";
 pub const N_QUOTA_DRAIN_RESET: &str = "arouter_quota_drain_reset_secs";
+pub const N_QUOTA_PROVIDER_INFO: &str = "arouter_quota_provider_info";
+pub const N_PROVIDER_BALANCE: &str = "arouter_provider_balance";
+pub const N_PROVIDER_BALANCE_GRANTED: &str = "arouter_provider_balance_granted";
+pub const N_PROVIDER_BALANCE_TOPPED_UP: &str = "arouter_provider_balance_topped_up";
+pub const N_PROVIDER_BALANCE_AVAILABLE: &str = "arouter_provider_balance_available";
+pub const N_PROVIDER_BALANCE_TIMESTAMP: &str = "arouter_provider_balance_timestamp_seconds";
+pub const N_MODEL_HEALTH: &str = "arouter_model_health";
+pub const N_MODEL_COOLDOWN: &str = "arouter_model_cooldown_secs";
+pub const N_MODEL_FAIL_RATIO: &str = "arouter_model_fail_ratio_1h";
+
+pub const H_QUOTA_PROVIDER_INFO: &str =
+    "Mapping from registry model-provider prefix to aitop quota panel (always 1).";
+pub const H_PROVIDER_BALANCE: &str =
+    "Absolute account balance reported by the provider, by currency.";
+pub const H_PROVIDER_BALANCE_GRANTED: &str =
+    "Granted (promotional) portion of the provider account balance, by currency.";
+pub const H_PROVIDER_BALANCE_TOPPED_UP: &str =
+    "Topped-up (paid) portion of the provider account balance, by currency.";
+pub const H_PROVIDER_BALANCE_AVAILABLE: &str =
+    "1 when the provider reports the account as spendable, 0 when unavailable.";
+pub const H_PROVIDER_BALANCE_TIMESTAMP: &str =
+    "Unix timestamp of the last successful provider balance fetch.";
+pub const H_MODEL_HEALTH: &str = "Model routing health: 0=healthy, 1=cooldown, 2=circuit open.";
+pub const H_MODEL_COOLDOWN: &str =
+    "Seconds until a model's cooldown/circuit expires; 0 when healthy.";
+pub const H_MODEL_FAIL_RATIO: &str =
+    "Model failure ratio over the health circuit window (normally 1h).";
 
 /// Default buckets (seconds) for request latency.
 pub const LATENCY_BUCKETS: &[f64] = &[0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0];
@@ -92,6 +119,11 @@ struct Inner {
 #[derive(Default)]
 pub struct Metrics {
     inner: Mutex<Inner>,
+}
+
+/// Registry provider prefix from a model id (`or/anthropic/...` → `or`).
+fn provider_of(model: &str) -> &str {
+    model.split_once('/').map(|(p, _)| p).unwrap_or(model)
 }
 
 /// Render `caller="x",project="y"` label strings, skipping empty values and
@@ -263,6 +295,7 @@ impl Metrics {
             (c, p)
         };
         let caller = caller.as_str();
+        let provider = provider_of(&rec.model).to_string();
         self.counter_inc(
             N_REQUESTS_TOTAL,
             H_REQUESTS_TOTAL,
@@ -271,6 +304,7 @@ impl Metrics {
                 ("profile", rec.profile.clone()),
                 ("caller", caller.to_string()),
                 ("project", project.clone()),
+                ("provider", provider.clone()),
                 ("grade_requested", rec.grade_requested.clone()),
                 ("grade_served", rec.grade_served.clone()),
                 ("model", rec.model.clone()),
@@ -299,6 +333,7 @@ impl Metrics {
                 ("pool", rec.pool.clone()),
                 ("caller", caller.to_string()),
                 ("project", project.clone()),
+                ("provider", provider.clone()),
                 ("model", rec.model.clone()),
             ]
         };
@@ -322,6 +357,7 @@ impl Metrics {
                     ("profile", rec.profile.clone()),
                     ("caller", caller.to_string()),
                     ("project", project),
+                    ("provider", provider.clone()),
                     ("model", rec.model.clone()),
                 ],
                 rec.cost_usd,
@@ -344,7 +380,12 @@ impl Metrics {
                 N_LATENCY,
                 H_LATENCY,
                 LATENCY_BUCKETS,
-                &[("pool", rec.pool.clone()), ("caller", caller.to_string())],
+                &[
+                    ("pool", rec.pool.clone()),
+                    ("caller", caller.to_string()),
+                    ("model", rec.model.clone()),
+                    ("provider", provider.clone()),
+                ],
                 rec.latency_ms as f64 / 1000.0,
             );
             if let Some(ttfb) = rec.ttfb_ms {
@@ -352,7 +393,12 @@ impl Metrics {
                     N_TTFB,
                     H_TTFB,
                     TTFB_BUCKETS,
-                    &[("pool", rec.pool.clone()), ("caller", caller.to_string())],
+                    &[
+                        ("pool", rec.pool.clone()),
+                        ("caller", caller.to_string()),
+                        ("model", rec.model.clone()),
+                        ("provider", provider),
+                    ],
                     ttfb as f64 / 1000.0,
                 );
             }
@@ -501,6 +547,14 @@ mod tests {
     }
 
     #[test]
+    fn provider_prefix_is_extracted() {
+        assert_eq!(provider_of("or/anthropic/claude"), "or");
+        assert_eq!(provider_of("zai/glm-5.2"), "zai");
+        assert_eq!(provider_of("bare-model"), "bare-model");
+        assert_eq!(provider_of(""), "");
+    }
+
+    #[test]
     fn label_escaping() {
         let l = label_str(&[("caller", "a\"b\\c\nd".into())]);
         assert_eq!(l, "caller=\"a\\\"b\\\\c\\nd\"");
@@ -554,17 +608,18 @@ mod tests {
         m.record(&rec("ok"));
         let out = m.render();
         assert!(out.contains(
-            "arouter_requests_total{caller=\"alice\",event=\"request\",grade_requested=\"A+\",grade_served=\"A\",http_status=\"200\",model=\"or/gpt-5.2\",pool=\"ondemand\",profile=\"default\",project=\"arouter\",source_model=\"A+\",status=\"ok\",target_model=\"or/gpt-5.2\"} 1"
+            "arouter_requests_total{caller=\"alice\",event=\"request\",grade_requested=\"A+\",grade_served=\"A\",http_status=\"200\",model=\"or/gpt-5.2\",pool=\"ondemand\",profile=\"default\",project=\"arouter\",provider=\"or\",source_model=\"A+\",status=\"ok\",target_model=\"or/gpt-5.2\"} 1"
         ));
-        assert!(out.contains("arouter_tokens_total{caller=\"alice\",direction=\"in\",model=\"or/gpt-5.2\",pool=\"ondemand\",project=\"arouter\"} 1000\n"));
-        assert!(out.contains("arouter_tokens_total{caller=\"alice\",direction=\"out\",model=\"or/gpt-5.2\",pool=\"ondemand\",project=\"arouter\"} 3000\n"));
-        assert!(out.contains("arouter_cost_usd_total{caller=\"alice\",model=\"or/gpt-5.2\",pool=\"ondemand\",profile=\"default\",project=\"arouter\"} 0.013\n"));
+        assert!(out.contains("arouter_tokens_total{caller=\"alice\",direction=\"in\",model=\"or/gpt-5.2\",pool=\"ondemand\",project=\"arouter\",provider=\"or\"} 1000\n"));
+        assert!(out.contains("arouter_tokens_total{caller=\"alice\",direction=\"out\",model=\"or/gpt-5.2\",pool=\"ondemand\",project=\"arouter\",provider=\"or\"} 3000\n"));
+        assert!(out.contains("arouter_cost_usd_total{caller=\"alice\",model=\"or/gpt-5.2\",pool=\"ondemand\",profile=\"default\",project=\"arouter\",provider=\"or\"} 0.013\n"));
         assert!(out.contains("arouter_requests_degraded_total{caller=\"alice\",pool=\"ondemand\",profile=\"default\"} 1\n"));
         assert!(out.contains(
-            "arouter_request_duration_seconds_sum{caller=\"alice\",pool=\"ondemand\"} 2.5\n"
+            "arouter_request_duration_seconds_sum{caller=\"alice\",model=\"or/gpt-5.2\",pool=\"ondemand\",provider=\"or\"} 2.5\n"
         ));
-        assert!(out
-            .contains("arouter_stream_ttfb_seconds_sum{caller=\"alice\",pool=\"ondemand\"} 0.3\n"));
+        assert!(out.contains(
+            "arouter_stream_ttfb_seconds_sum{caller=\"alice\",model=\"or/gpt-5.2\",pool=\"ondemand\",provider=\"or\"} 0.3\n"
+        ));
     }
 
     #[test]

@@ -214,6 +214,7 @@ pub async fn run(config_path: Option<&Path>, bind_override: Option<&str>) -> Rep
             crate::quotaeng::SourceKind::Native(k) => {
                 let spec = match k {
                     crate::quotaeng::NativeKind::OpenRouter => "native:openrouter",
+                    crate::quotaeng::NativeKind::DeepSeek => "native:deepseek",
                     crate::quotaeng::NativeKind::Zai => "native:zai",
                 };
                 native.push((prefix, spec));

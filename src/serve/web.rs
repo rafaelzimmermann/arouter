@@ -1,17 +1,20 @@
-//! E10a — web sessions and the claim bootstrap.
+//! E10a — web sessions and the first-access admin bootstrap.
 //!
-//! The review's order is explicit: *"sessions/claim first, then token
+//! The review's order is explicit: *"sessions first, then token
 //! scope enforcement, then model/provider/quota management"*. This module
 //! is that first step, and deliberately touches nothing on the proxy hot
 //! path: the web surface is a separate route group on the same listener.
 //!
-//! - **Claim**: at startup the daemon mints one single-use token in
-//!   memory and prints `web: claim http://<bind>/claim/<token>` under the
-//!   banner. Only a loopback peer can consume it, and only once; consuming
-//!   it mints an admin session. No default password ships with the binary.
+//! - **Bootstrap**: while no admin exists, the first visitor may create
+//!   the admin username/password. Credentials are stored as an Argon2id
+//!   hash in `<state_dir>/admin.toml` (0600); no default password ships
+//!   with the binary. Once configured, setup is permanently closed.
+//! - **Login**: username/password over same-origin POSTs. Wrong
+//!   credentials are indistinguishable, and failed attempts are throttled
+//!   per peer in memory.
 //! - **Sessions**: opaque 32-byte ids, in memory only (a restart drops
-//!   them and rotates the claim), carried in an `HttpOnly;
-//!   SameSite=Strict` cookie, TTL from `[web].session_ttl_hours`.
+//!   them), carried in an `HttpOnly; SameSite=Strict` cookie, TTL from
+//!   `[web].session_ttl_hours`.
 //! - **CSRF**: mutating calls need an authenticated session *and* a
 //!   same-origin request (`Origin`/`Referer` host must match `Host`, or
 //!   `Sec-Fetch-Site: same-origin`). Plain-HTTP LAN deployments still get
@@ -21,14 +24,16 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use axum::extract::{ConnectInfo, Path, Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
+use crate::admin::{self, AdminRecord, AdminStore};
 use crate::config::WebConfig;
 use crate::proxy::AppState;
 use crate::quota::unix_now;
@@ -40,37 +45,84 @@ const APP_JS: &str = include_str!("../../web/app.js");
 const STYLE_CSS: &str = include_str!("../../web/style.css");
 const CSP: &str = "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
+const LOGIN_MAX_FAILURES: u32 = 5;
+const LOGIN_WINDOW_SECS: u64 = 5 * 60;
+const LOGIN_MAX_TRACKED: usize = 4096;
+const MAX_LOGIN_BODY: usize = 8 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct Session {
     pub role: String,
+    pub username: String,
     pub expires_unix: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FailureWindow {
+    first_unix: u64,
+    count: u32,
+    blocked_until: u64,
 }
 
 struct Inner {
     sessions: HashMap<String, Session>,
-    /// single-use claim token; `None` once consumed
-    claim: Option<String>,
+    /// `None` = no admin yet. A load error leaves `admin = None` and
+    /// `auth_error = Some(..)`, which keeps setup closed.
+    admin: Option<AdminRecord>,
+    auth_error: Option<String>,
+    /// failed-login windows, bounded and pruned on every attempt
+    failures: HashMap<Option<IpAddr>, FailureWindow>,
 }
 
-/// Session + claim state. In-memory by design: durable web state belongs
-/// to the managed overlay (E10c), not to an auth token store.
+/// Session + durable admin-credential state.
 pub struct Web {
     inner: Mutex<Inner>,
     ttl: Duration,
     enabled: bool,
+    store: AdminStore,
+}
+
+/// Failure modes shared by setup and login. Handlers map these to HTTP
+/// statuses; the variants deliberately do not reveal whether a username
+/// exists.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CredentialError {
+    Invalid(String),
+    SetupRequired,
+    AlreadyConfigured,
+    BadCredentials,
+    Throttled { retry_after_secs: u64 },
+    Unavailable(String),
+    Storage(String),
+    Internal(String),
 }
 
 impl Web {
-    /// Mint a fresh claim token. Nothing is persisted, so every start
-    /// rotates the link — an old link is dead the moment the daemon is.
-    pub fn new(cfg: &WebConfig) -> Self {
+    /// Load `<state_dir>/admin.toml` once at startup. A corrupt existing
+    /// file is fail-closed: no setup, no login until repaired.
+    pub fn new(cfg: &WebConfig, state_dir: &Path) -> Self {
+        let store = AdminStore::new(state_dir);
+        let (admin, auth_error) = match store.load() {
+            Ok(admin) => (admin, None),
+            Err(e) => {
+                tracing::error!(
+                    path = %store.path().display(),
+                    error = %e,
+                    "admin credentials unusable; setup and login are closed"
+                );
+                (None, Some(e))
+            }
+        };
         Web {
             inner: Mutex::new(Inner {
                 sessions: HashMap::new(),
-                claim: Some(random_token()),
+                admin,
+                auth_error,
+                failures: HashMap::new(),
             }),
             ttl: Duration::from_secs(cfg.session_ttl_hours.max(1) * 3600),
             enabled: cfg.enabled,
+            store,
         }
     }
 
@@ -82,29 +134,126 @@ impl Web {
         self.ttl.as_secs()
     }
 
-    /// The unconsumed claim token — for the startup banner.
-    pub fn claim_token(&self) -> Option<String> {
-        self.inner.lock().unwrap().claim.clone()
+    /// No admin and no unreadable credential file: show the setup form.
+    pub fn setup_required(&self) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.admin.is_none() && inner.auth_error.is_none()
     }
 
-    /// Consume the claim: exact token, loopback peer, once. Returns the
-    /// new session id on success.
-    pub fn consume_claim(&self, token: &str, peer: Option<IpAddr>, now: u64) -> Option<String> {
-        if !peer.is_some_and(|p| p.is_loopback()) {
-            return None;
+    /// An existing credential file could not be loaded.
+    pub fn setup_locked(&self) -> bool {
+        self.inner.lock().unwrap().auth_error.is_some()
+    }
+
+    pub fn admin_username(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap()
+            .admin
+            .as_ref()
+            .map(|a| a.username.clone())
+    }
+
+    /// Create the one admin account and mint its first session. The
+    /// read-check happens before hashing (cheap rejection), then again
+    /// under the lock so two simultaneous first visitors cannot both win.
+    pub async fn create_admin(
+        &self,
+        username: &str,
+        password: &str,
+        now: u64,
+    ) -> Result<(String, String), CredentialError> {
+        let username = admin::validate_username(username).map_err(CredentialError::Invalid)?;
+        admin::validate_password(password).map_err(CredentialError::Invalid)?;
+
+        {
+            let inner = self.inner.lock().unwrap();
+            if let Some(e) = &inner.auth_error {
+                return Err(CredentialError::Unavailable(e.clone()));
+            }
+            if inner.admin.is_some() {
+                return Err(CredentialError::AlreadyConfigured);
+            }
         }
+
+        let password = password.to_string();
+        let hash = tokio::task::spawn_blocking(move || admin::hash_password(&password))
+            .await
+            .map_err(|e| CredentialError::Internal(format!("hash task failed ({e})")))?
+            .map_err(CredentialError::Storage)?;
+        let rec = AdminRecord {
+            version: admin::VERSION,
+            username: username.clone(),
+            password_hash: hash,
+            created_unix: now,
+            updated_unix: now,
+        };
+
         let mut inner = self.inner.lock().unwrap();
-        if inner.claim.as_deref() != Some(token) {
-            return None;
+        if let Some(e) = &inner.auth_error {
+            return Err(CredentialError::Unavailable(e.clone()));
         }
-        inner.claim = None;
-        Some(mint(&mut inner, "admin", now, self.ttl))
+        if inner.admin.is_some() {
+            return Err(CredentialError::AlreadyConfigured);
+        }
+        self.store.save(&rec).map_err(CredentialError::Storage)?;
+        inner.admin = Some(rec);
+        inner.failures.clear();
+        let sid = mint(&mut inner, "admin", &username, now, self.ttl);
+        Ok((sid, username))
+    }
+
+    /// Verify username/password and mint a session. A wrong username runs
+    /// the same Argon2 verification as a wrong password.
+    pub async fn login(
+        &self,
+        username: &str,
+        password: &str,
+        peer: Option<IpAddr>,
+        now: u64,
+    ) -> Result<(String, String), CredentialError> {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            prune_failures(&mut inner, now);
+            if let Some(w) = inner.failures.get(&peer) {
+                if w.blocked_until > now {
+                    return Err(CredentialError::Throttled {
+                        retry_after_secs: w.blocked_until - now,
+                    });
+                }
+            }
+            if let Some(e) = &inner.auth_error {
+                return Err(CredentialError::Unavailable(e.clone()));
+            }
+        }
+
+        let Some(rec) = self.inner.lock().unwrap().admin.clone() else {
+            return Err(CredentialError::SetupRequired);
+        };
+        let username_in = username.trim().to_string();
+        let password_in = password.to_string();
+        let hash = rec.password_hash.clone();
+        let password_ok =
+            tokio::task::spawn_blocking(move || admin::verify_password(&hash, &password_in))
+                .await
+                .map_err(|e| CredentialError::Internal(format!("verify task failed ({e})")))?;
+
+        if !password_ok || username_in != rec.username {
+            let mut inner = self.inner.lock().unwrap();
+            record_failure(&mut inner, peer, now);
+            return Err(CredentialError::BadCredentials);
+        }
+
+        let mut inner = self.inner.lock().unwrap();
+        inner.failures.remove(&peer);
+        let sid = mint(&mut inner, "admin", &rec.username, now, self.ttl);
+        Ok((sid, rec.username))
     }
 
     /// Mint a session directly — test harness and E10b token scope use.
     pub fn mint_session(&self, role: &str, now: u64) -> String {
         let mut inner = self.inner.lock().unwrap();
-        mint(&mut inner, role, now, self.ttl)
+        mint(&mut inner, role, role, now, self.ttl)
     }
 
     /// Validate a session id. Expired entries are dropped on read.
@@ -125,28 +274,66 @@ impl Web {
     }
 }
 
-fn mint(inner: &mut Inner, role: &str, now: u64, ttl: Duration) -> String {
+fn mint(inner: &mut Inner, role: &str, username: &str, now: u64, ttl: Duration) -> String {
     let sid = random_token();
     inner.sessions.insert(
         sid.clone(),
         Session {
             role: role.to_string(),
+            username: username.to_string(),
             expires_unix: now + ttl.as_secs(),
         },
     );
     sid
 }
 
-/// Where the claim link points. The token is only consumable from
-/// loopback, so a wildcard bind must not advertise `0.0.0.0` — the
-/// operator needs a URL they can actually open.
-pub fn claim_url(bind: &str, token: &str) -> String {
-    let host = match bind.rsplit_once(':') {
-        Some((h, _)) if h == "0.0.0.0" || h == "[::]" || h == "::" => "127.0.0.1",
-        _ => bind.rsplit_once(':').map(|(h, _)| h).unwrap_or(bind),
+fn prune_failures(inner: &mut Inner, now: u64) {
+    let retention = LOGIN_WINDOW_SECS * 2;
+    inner
+        .failures
+        .retain(|_, w| w.blocked_until > now || now.saturating_sub(w.first_unix) <= retention);
+}
+
+fn record_failure(inner: &mut Inner, peer: Option<IpAddr>, now: u64) {
+    if !inner.failures.contains_key(&peer) && inner.failures.len() >= LOGIN_MAX_TRACKED {
+        inner.failures.retain(|_, w| w.blocked_until > now);
+        if inner.failures.len() >= LOGIN_MAX_TRACKED {
+            inner.failures.clear();
+        }
+    }
+    let w = inner.failures.entry(peer).or_insert(FailureWindow {
+        first_unix: now,
+        count: 0,
+        blocked_until: 0,
+    });
+    if now.saturating_sub(w.first_unix) > LOGIN_WINDOW_SECS {
+        *w = FailureWindow {
+            first_unix: now,
+            count: 0,
+            blocked_until: 0,
+        };
+    }
+    w.count = w.count.saturating_add(1);
+    if w.count >= LOGIN_MAX_FAILURES {
+        w.blocked_until = now + LOGIN_WINDOW_SECS;
+    }
+}
+
+/// Where the web UI lives. A wildcard bind must not advertise `0.0.0.0`
+/// — the operator needs a URL they can actually open.
+pub fn web_url(bind: &str) -> String {
+    if bind == "::" {
+        return "http://127.0.0.1:3929/".to_string();
+    }
+    let (host, port) = match bind.rsplit_once(':') {
+        Some((h, p)) => (h, p),
+        None => (bind, "3929"),
     };
-    let port = bind.rsplit_once(':').map(|(_, p)| p).unwrap_or("3929");
-    format!("http://{host}:{port}/claim/{token}")
+    let host = match host {
+        "0.0.0.0" | "[::]" | "::" => "127.0.0.1",
+        other => other,
+    };
+    format!("http://{host}:{port}/")
 }
 
 fn random_token() -> String {
@@ -170,8 +357,8 @@ fn cookie_sid(headers: &HeaderMap) -> Option<String> {
 /// rejected outright. `same-origin` passes. Otherwise fall back to
 /// `Origin`/`Referer` host equality — and when neither header exists
 /// (curl, typed navigation, same-origin GET with no referrer policy) the
-/// caller decides via `bare_ok`: true for the claim landing page, false
-/// for every mutating call.
+/// caller decides via `bare_ok` (true only for GET pages, false for
+/// every mutating call).
 fn origin_ok(headers: &HeaderMap, host: Option<&str>, bare_ok: bool) -> bool {
     match headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
         Some("cross-site" | "same-site") => return false,
@@ -220,7 +407,7 @@ fn unauthenticated() -> Response {
     api_error(
         StatusCode::UNAUTHORIZED,
         "unauthenticated",
-        "claim the daemon from loopback to start a session",
+        "sign in or create the admin account to start a session",
     )
 }
 
@@ -276,13 +463,61 @@ pub async fn style_css(State(st): State<AppState>) -> Response {
     asset("text/css; charset=utf-8", "default-src 'none'", STYLE_CSS)
 }
 
-/// `GET /claim/{token}` — consume the single-use link from loopback and
-/// start the admin session.
-pub async fn claim(
-    State(st): State<AppState>,
-    Path(token): Path<String>,
-    req: Request,
-) -> Response {
+/// `GET /api/setup` — public bootstrap state. `allowed` is true while
+/// no admin exists: the first visitor to POST credentials wins.
+pub async fn api_setup(State(st): State<AppState>) -> Response {
+    if !st.web.enabled() {
+        return not_found();
+    }
+    let required = st.web.setup_required();
+    let locked = st.web.setup_locked();
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({
+            "required": required,
+            "allowed": required,
+            "locked": locked,
+        })),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct CredentialsBody {
+    username: String,
+    password: String,
+}
+
+/// `POST /api/setup` — create the first admin and immediately sign in.
+pub async fn api_setup_create(State(st): State<AppState>, req: Request) -> Response {
+    if !st.web.enabled() {
+        return not_found();
+    }
+    let headers = req.headers().clone();
+    if !same_origin(&headers) {
+        return bad_origin();
+    }
+    let body = match axum::body::to_bytes(req.into_body(), MAX_LOGIN_BODY).await {
+        Ok(b) => b,
+        Err(_) => return bad_request("request body too large".into()),
+    };
+    let parsed: CredentialsBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => return bad_request(format!("invalid json: {e}")),
+    };
+    match st
+        .web
+        .create_admin(&parsed.username, &parsed.password, unix_now())
+        .await
+    {
+        Ok((sid, username)) => session_success(StatusCode::CREATED, &st, &sid, &username),
+        Err(e) => credential_error(e),
+    }
+}
+
+/// `POST /api/login` — username/password sign-in. The peer address is
+/// used only for the in-memory throttle.
+pub async fn api_login(State(st): State<AppState>, req: Request) -> Response {
     if !st.web.enabled() {
         return not_found();
     }
@@ -290,37 +525,98 @@ pub async fn claim(
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|c| c.0.ip());
-    let host = req
-        .headers()
+    let headers = req.headers().clone();
+    if !same_origin(&headers) {
+        return bad_origin();
+    }
+    let body = match axum::body::to_bytes(req.into_body(), MAX_LOGIN_BODY).await {
+        Ok(b) => b,
+        Err(_) => return bad_request("request body too large".into()),
+    };
+    let parsed: CredentialsBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => return bad_request(format!("invalid json: {e}")),
+    };
+    match st
+        .web
+        .login(&parsed.username, &parsed.password, peer, unix_now())
+        .await
+    {
+        Ok((sid, username)) => session_success(StatusCode::OK, &st, &sid, &username),
+        Err(e) => credential_error(e),
+    }
+}
+
+fn same_origin(headers: &HeaderMap) -> bool {
+    let host = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    // a typed navigation has no Origin/Referer — that is the legitimate
-    // path here, so bare requests are allowed; cross-site fetches are not
-    if !origin_ok(req.headers(), host.as_deref(), true) {
-        return bad_origin();
-    }
-    match st.web.consume_claim(&token, peer, unix_now()) {
-        Some(sid) => {
-            let cookie = format!(
-                "{COOKIE}={sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
-                st.web.ttl_secs()
-            );
-            (
-                StatusCode::SEE_OTHER,
-                [
-                    (header::SET_COOKIE, cookie),
-                    (header::LOCATION, "/".to_string()),
-                    (header::CACHE_CONTROL, "no-store".to_string()),
-                ],
-            )
-                .into_response()
-        }
-        None => api_error(
-            StatusCode::FORBIDDEN,
-            "claim_rejected",
-            "the claim link is single-use, loopback-only, and must match this daemon's current token",
+    origin_ok(headers, host.as_deref(), false)
+}
+
+fn session_success(status: StatusCode, st: &AppState, sid: &str, username: &str) -> Response {
+    let cookie = format!(
+        "{COOKIE}={sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
+        st.web.ttl_secs()
+    );
+    (
+        status,
+        [
+            (header::SET_COOKIE, cookie),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        Json(serde_json::json!({
+            "ok": true,
+            "role": "admin",
+            "username": username,
+        })),
+    )
+        .into_response()
+}
+
+fn credential_error(e: CredentialError) -> Response {
+    match e {
+        CredentialError::Invalid(msg) => bad_request(msg),
+        CredentialError::SetupRequired => api_error(
+            StatusCode::CONFLICT,
+            "setup_required",
+            "create the admin account before signing in",
         ),
+        CredentialError::AlreadyConfigured => api_error(
+            StatusCode::CONFLICT,
+            "setup_complete",
+            "an admin account already exists; sign in instead",
+        ),
+        CredentialError::BadCredentials => api_error(
+            StatusCode::UNAUTHORIZED,
+            "bad_credentials",
+            "invalid username or password",
+        ),
+        CredentialError::Throttled { retry_after_secs } => {
+            let mut resp = api_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "login_throttled",
+                "too many failed sign-in attempts; try again later",
+            );
+            if let Ok(v) = retry_after_secs.to_string().parse() {
+                resp.headers_mut().insert(header::RETRY_AFTER, v);
+            }
+            resp
+        }
+        CredentialError::Unavailable(msg) => api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "admin_unavailable",
+            &format!("admin credentials are unavailable: {msg}"),
+        ),
+        CredentialError::Storage(msg) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "admin_write_failed",
+            &format!("could not persist admin credentials: {msg}"),
+        ),
+        CredentialError::Internal(msg) => {
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "admin_internal", &msg)
+        }
     }
 }
 
@@ -333,6 +629,7 @@ pub async fn api_session(State(st): State<AppState>, headers: HeaderMap) -> Resp
         Some(s) => Json(serde_json::json!({
             "authenticated": true,
             "role": s.role,
+            "username": s.username,
             "expires_unix": s.expires_unix,
         }))
         .into_response(),
@@ -952,36 +1249,175 @@ mod tests {
         h
     }
 
-    #[test]
-    fn claim_is_single_use_and_loopback_only() {
-        let web = Web::new(&WebConfig::default());
-        let tok = web.claim_token().expect("fresh claim");
-        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
-        let far: IpAddr = "192.168.50.9".parse().unwrap();
-        let now = 1_000;
+    fn tempdir() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        let d = std::env::temp_dir().join(format!(
+            "arouter-web-{}-{}-{:x}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
 
-        // remote peers and wrong tokens never consume it
-        assert!(web.consume_claim(&tok, Some(far), now).is_none());
-        assert!(web.consume_claim("deadbeef", Some(loopback), now).is_none());
-        assert!(web.consume_claim(&tok, None, now).is_none());
-        assert_eq!(web.claim_token().as_deref(), Some(tok.as_str()));
+    #[tokio::test]
+    async fn setup_creates_the_admin_once_and_login_works() {
+        let dir = tempdir();
+        let web = Web::new(&WebConfig::default(), &dir);
+        assert!(web.setup_required());
+        assert!(!web.setup_locked());
 
-        // loopback consumes it exactly once…
-        let sid = web
-            .consume_claim(&tok, Some(loopback), now)
-            .expect("claimed");
-        assert_eq!(web.session(&sid, now).unwrap().role, "admin");
-        // …and the link is dead afterwards, even from loopback
-        assert!(web.claim_token().is_none());
-        assert!(web.consume_claim(&tok, Some(loopback), now).is_none());
+        let (sid, user) = web
+            .create_admin(" alice ", "correct horse battery", 1_000)
+            .await
+            .unwrap();
+        assert_eq!(user, "alice");
+        let s = web.session(&sid, 1_000).expect("first session");
+        assert_eq!(s.role, "admin");
+        assert_eq!(s.username, "alice");
+        assert!(!web.setup_required());
+        assert_eq!(web.admin_username().as_deref(), Some("alice"));
+
+        // the credential was persisted, and setup is closed forever
+        let loaded = AdminStore::new(&dir).load().unwrap().expect("admin file");
+        assert_eq!(loaded.username, "alice");
+        assert_eq!(
+            web.create_admin("bob", "another password", 1_001)
+                .await
+                .unwrap_err(),
+            CredentialError::AlreadyConfigured
+        );
+
+        // wrong username and wrong password are the same failure
+        let peer: IpAddr = "192.168.50.9".parse().unwrap();
+        assert_eq!(
+            web.login("alice", "not the password", Some(peer), 1_002)
+                .await
+                .unwrap_err(),
+            CredentialError::BadCredentials
+        );
+        assert_eq!(
+            web.login("bob", "correct horse battery", Some(peer), 1_002)
+                .await
+                .unwrap_err(),
+            CredentialError::BadCredentials
+        );
+
+        let (sid2, user) = web
+            .login("alice", "correct horse battery", Some(peer), 1_003)
+            .await
+            .unwrap();
+        assert_eq!(user, "alice");
+        assert_eq!(web.session(&sid2, 1_003).unwrap().username, "alice");
+    }
+
+    #[tokio::test]
+    async fn concurrent_setup_has_exactly_one_winner() {
+        let dir = tempdir();
+        let web = Web::new(&WebConfig::default(), &dir);
+        let (a, b) = tokio::join!(
+            web.create_admin("alice", "correct horse battery", 1_000),
+            web.create_admin("bob", "correct horse battery", 1_000)
+        );
+        let winners = [&a, &b].iter().filter(|r| r.is_ok()).count();
+        assert_eq!(winners, 1, "{a:?} / {b:?}");
+        let loser = if a.is_ok() { &b } else { &a };
+        assert_eq!(
+            *loser.as_ref().unwrap_err(),
+            CredentialError::AlreadyConfigured
+        );
+        assert_eq!(AdminStore::new(&dir).load().unwrap().unwrap().version, 1);
+    }
+
+    #[tokio::test]
+    async fn login_failures_are_throttled_and_clear_on_success() {
+        let dir = tempdir();
+        let web = Web::new(&WebConfig::default(), &dir);
+        web.create_admin("alice", "correct horse battery", 1_000)
+            .await
+            .unwrap();
+        let peer: IpAddr = "192.168.50.9".parse().unwrap();
+
+        for _ in 0..LOGIN_MAX_FAILURES {
+            assert_eq!(
+                web.login("alice", "wrong", Some(peer), 1_000)
+                    .await
+                    .unwrap_err(),
+                CredentialError::BadCredentials
+            );
+        }
+        match web
+            .login("alice", "correct horse battery", Some(peer), 1_001)
+            .await
+            .unwrap_err()
+        {
+            CredentialError::Throttled { retry_after_secs } => {
+                assert!(retry_after_secs > 0 && retry_after_secs <= LOGIN_WINDOW_SECS);
+            }
+            other => panic!("expected throttle, got {other:?}"),
+        }
+
+        // another peer is unaffected
+        let other: IpAddr = "192.168.50.10".parse().unwrap();
+        assert!(web
+            .login("alice", "correct horse battery", Some(other), 1_001)
+            .await
+            .is_ok());
+
+        // the throttle expires, and a success clears the old window
+        assert!(web
+            .login(
+                "alice",
+                "correct horse battery",
+                Some(peer),
+                1_000 + LOGIN_WINDOW_SECS + 1
+            )
+            .await
+            .is_ok());
+        assert_eq!(
+            web.login("alice", "wrong", Some(peer), 1_000 + LOGIN_WINDOW_SECS + 2)
+                .await
+                .unwrap_err(),
+            CredentialError::BadCredentials
+        );
+    }
+
+    #[tokio::test]
+    async fn corrupt_admin_file_fails_closed() {
+        let dir = tempdir();
+        std::fs::write(crate::admin::path_for(&dir), "not [ valid toml").unwrap();
+        let web = Web::new(&WebConfig::default(), &dir);
+        assert!(!web.setup_required());
+        assert!(web.setup_locked());
+        assert!(matches!(
+            web.create_admin("alice", "correct horse battery", 1_000)
+                .await
+                .unwrap_err(),
+            CredentialError::Unavailable(_)
+        ));
+        assert!(matches!(
+            web.login("alice", "correct horse battery", None, 1_000)
+                .await
+                .unwrap_err(),
+            CredentialError::Unavailable(_)
+        ));
     }
 
     #[test]
     fn sessions_expire_and_revoke() {
-        let web = Web::new(&WebConfig {
-            enabled: true,
-            session_ttl_hours: 1,
-        });
+        let dir = tempdir();
+        let web = Web::new(
+            &WebConfig {
+                enabled: true,
+                session_ttl_hours: 1,
+            },
+            &dir,
+        );
         let sid = web.mint_session("admin", 1_000);
         assert!(web.session(&sid, 1_000 + 3599).is_some());
         assert!(web.session(&sid, 1_000 + 3601).is_none(), "expired");
@@ -1049,32 +1485,14 @@ mod tests {
     }
 
     #[test]
-    fn claim_url_is_openable_not_a_wildcard() {
+    fn web_url_is_openable_not_a_wildcard() {
+        assert_eq!(web_url("0.0.0.0:3929"), "http://127.0.0.1:3929/");
+        assert_eq!(web_url("[::]:3929"), "http://127.0.0.1:3929/");
+        assert_eq!(web_url("::"), "http://127.0.0.1:3929/");
+        assert_eq!(web_url("127.0.0.1:3929"), "http://127.0.0.1:3929/");
         assert_eq!(
-            claim_url("0.0.0.0:3929", "abc"),
-            "http://127.0.0.1:3929/claim/abc"
+            web_url("192.168.50.192:4000"),
+            "http://192.168.50.192:4000/"
         );
-        assert_eq!(
-            claim_url("[::]:3929", "abc"),
-            "http://127.0.0.1:3929/claim/abc"
-        );
-        assert_eq!(
-            claim_url("127.0.0.1:3929", "abc"),
-            "http://127.0.0.1:3929/claim/abc"
-        );
-        assert_eq!(
-            claim_url("192.168.50.192:4000", "abc"),
-            "http://192.168.50.192:4000/claim/abc"
-        );
-    }
-
-    #[test]
-    fn claim_tokens_are_unguessable() {
-        let a = Web::new(&WebConfig::default());
-        let b = Web::new(&WebConfig::default());
-        let (ta, tb) = (a.claim_token().unwrap(), b.claim_token().unwrap());
-        assert_ne!(ta, tb);
-        assert_eq!(ta.len(), 64, "32 random bytes, hex");
-        assert!(ta.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }

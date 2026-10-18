@@ -9,6 +9,7 @@
   --bad: #f85149;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body {
   margin: 0;
   background: var(--bg);
@@ -57,12 +58,21 @@ table { border-collapse: collapse; width: 100%; margin: 8px 0 12px; font-size: 1
 th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); }
 th { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
 form#mktoken, form#addmodel, form#qovform { display: flex; flex-wrap: wrap; gap: 8px; }
-form#mktoken input, form#addmodel input, form#qovform input {
+form.authform {
+  display: flex; flex-direction: column; gap: 10px;
+  max-width: 440px; margin-top: 18px;
+}
+form#mktoken input, form#addmodel input, form#qovform input,
+form.authform input {
   background: var(--panel); color: var(--txt); border: 1px solid var(--line);
   border-radius: 6px; padding: 7px 10px; font: inherit; min-width: 140px;
 }
+form.authform input { width: 100%; }
+form.authform button { align-self: flex-start; }
 form#mktoken input::placeholder, form#addmodel input::placeholder,
-form#qovform input::placeholder { color: var(--dim); }
+form#qovform input::placeholder, form.authform input::placeholder {
+  color: var(--dim);
+}
 tr.off td { color: var(--dim); text-decoration: line-through; }
 td.acts { display: flex; gap: 6px; }
 td.acts button { padding: 3px 9px; font-size: 12px; }
