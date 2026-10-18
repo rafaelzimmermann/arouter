@@ -637,6 +637,32 @@ fn candidate_parts(cand: &Value) -> (String, String, Vec<Value>) {
     (text, reasoning, calls)
 }
 
+/// Gemini's bridge can put a chat-shaped `{text, tool_calls}` object in a
+/// text part while also returning the real calls as `functionCall` parts.
+/// Expose only the human text when both representations agree on call names.
+fn unwrap_tool_call_envelope(text: &str, calls: &[Value]) -> Option<String> {
+    if calls.is_empty() {
+        return None;
+    }
+    let envelope: Value = serde_json::from_str(text.trim()).ok()?;
+    let human_text = envelope.get("text")?.as_str()?;
+    let wrapped_calls = envelope.get("tool_calls")?.as_array()?;
+    if wrapped_calls.len() != calls.len() {
+        return None;
+    }
+    for (wrapped, actual) in wrapped_calls.iter().zip(calls) {
+        let wrapped_name = wrapped
+            .pointer("/function/name")
+            .or_else(|| wrapped.get("name"))
+            .and_then(Value::as_str)?;
+        let actual_name = actual.pointer("/function/name").and_then(Value::as_str)?;
+        if wrapped_name != actual_name {
+            return None;
+        }
+    }
+    Some(human_text.to_string())
+}
+
 /// A buffered `GenerateContentResponse` → chat-completions JSON.
 pub fn gemini_to_openai(resp: &Value, model: &str) -> Result<Value, String> {
     if let Some(m) = resp.pointer("/error/message").and_then(Value::as_str) {
@@ -661,7 +687,10 @@ pub fn gemini_to_openai(resp: &Value, model: &str) -> Result<Value, String> {
         }
         return Err("gemini returned no candidates".into());
     }
-    let (text, reasoning, calls) = candidate_parts(&candidates[0]);
+    let (mut text, reasoning, calls) = candidate_parts(&candidates[0]);
+    if let Some(unwrapped) = unwrap_tool_call_envelope(&text, &calls) {
+        text = unwrapped;
+    }
     let finish = map_finish_reason(
         candidates[0]
             .get("finishReason")
@@ -739,6 +768,7 @@ pub struct GeminiParser {
     role_sent: bool,
     final_sent: bool,
     text: String,
+    defer_text: bool,
     reasoning: String,
     tool_calls: Vec<Value>,
     finish_reason: Option<&'static str>,
@@ -756,6 +786,7 @@ impl GeminiParser {
             role_sent: false,
             final_sent: false,
             text: String::new(),
+            defer_text: false,
             reasoning: String::new(),
             tool_calls: vec![],
             finish_reason: None,
@@ -792,7 +823,12 @@ impl GeminiParser {
         let mut deltas: Vec<Delta> = vec![];
         if !text.is_empty() {
             self.text += &text;
-            deltas.push(Delta::Text(text));
+            if !self.defer_text && self.text.trim_start().starts_with('{') {
+                self.defer_text = true;
+            }
+            if !self.defer_text {
+                deltas.push(Delta::Text(text));
+            }
         }
         if !reasoning.is_empty() {
             self.reasoning += &reasoning;
@@ -802,6 +838,14 @@ impl GeminiParser {
         if let Some(r) = cands[0].get("finishReason").and_then(Value::as_str) {
             self.finish_reason = Some(map_finish_reason(r, !self.tool_calls.is_empty()));
             self.terminal = true;
+            if self.defer_text {
+                if let Some(unwrapped) = unwrap_tool_call_envelope(&self.text, &self.tool_calls) {
+                    self.text = unwrapped;
+                }
+                if !self.text.is_empty() {
+                    deltas.push(Delta::Text(self.text.clone()));
+                }
+            }
         }
         Ok(deltas)
     }
@@ -1560,6 +1604,56 @@ mod tests {
             v["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
             "{\"q\":\"x\"}"
         );
+    }
+
+    #[test]
+    fn unwraps_bridge_tool_call_envelope() {
+        let envelope = json!({
+            "text": "Searching now.",
+            "tool_calls": [{ "name": "lookup", "arguments": { "q": "x" } }],
+        })
+        .to_string();
+        let response = json!({
+            "candidates": [{
+                "content": { "parts": [
+                    { "text": envelope },
+                    { "functionCall": { "name": "lookup", "args": { "q": "x" } } },
+                ] },
+                "finishReason": "STOP",
+            }],
+        });
+        let buffered = gemini_to_openai(&response, "gemini").unwrap();
+        assert_eq!(
+            buffered["choices"][0]["message"]["content"],
+            "Searching now."
+        );
+        assert_eq!(
+            buffered["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+            "lookup"
+        );
+
+        let mut parser = GeminiParser::new("gemini");
+        let deltas = parser.event(&response).unwrap();
+        let frames = parser.chunks_for(deltas).concat();
+        assert!(frames.contains("Searching now."), "{frames}");
+        assert!(!frames.contains("\"tool_calls\":[{\"name\""), "{frames}");
+        assert!(
+            frames.contains("\"finish_reason\":\"tool_calls\""),
+            "{frames}"
+        );
+    }
+
+    #[test]
+    fn leaves_json_text_alone_without_structured_calls() {
+        let text = r#"{"text":"ordinary json"}"#;
+        let response = json!({
+            "candidates": [{
+                "content": { "parts": [{ "text": text }] },
+                "finishReason": "STOP",
+            }],
+        });
+        let output = gemini_to_openai(&response, "gemini").unwrap();
+        assert_eq!(output["choices"][0]["message"]["content"], text);
     }
 
     #[test]
