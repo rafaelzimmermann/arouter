@@ -253,6 +253,9 @@ pub(crate) async fn try_candidates(
                     st.quota
                         .clear_openrouter_wallet(&quota_provider, unix_now());
                 }
+                if prefix == "deepseek" {
+                    st.quota.clear_balance_exhaustion(&prefix, unix_now());
+                }
                 let degraded = rt.registry.grade_for_request(raw_model, m).1 != req.ceiling
                     && !req.whole_ladder;
                 if harvest {
@@ -413,7 +416,6 @@ pub(crate) async fn try_candidates(
                         &msg,
                         t0.elapsed().as_millis() as u64,
                     );
-                    st.health.record_failure(&m.id, false);
                     tracing::warn!(model = m.id, provider = %prefix, "OpenRouter account credits exhausted; suppressing provider for 300s");
                     err.last_error = format!("{}: {msg}", m.id);
                     err.attempts += 1;

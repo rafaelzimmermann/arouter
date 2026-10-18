@@ -327,12 +327,17 @@ pub fn provider_availability(
     // to learn the new period. Stale, reset-less samples are unknown too,
     // unless an explicit manual override is still in force.
     let manual_active = p.manual_until.is_some_and(|until| until > now);
+    let balance_unavailable = p.balance.as_ref().is_some_and(|balance| !balance.available);
     let active: Vec<_> = p
         .windows
         .iter()
         .filter(|w| match w.reset_unix {
             Some(reset) => reset > now,
-            None => manual_active || !(stale || p.stale),
+            None => {
+                manual_active
+                    || (w.label == "balance" && balance_unavailable)
+                    || !(stale || p.stale)
+            }
         })
         .collect();
     let exhausted: Vec<_> = active.iter().copied().filter(|w| w.pct >= 100.0).collect();
@@ -581,6 +586,22 @@ impl QuotaWatcher {
         let mut qs = QuotaState::clone(&current);
         if let Some(entry) = qs.providers.get_mut(provider) {
             entry.windows.retain(|w| w.label != "openrouter_wallet");
+            entry.updated_unix = Some(now);
+        }
+        self.set(qs);
+    }
+
+    /// A successful inference is ground truth that the provider can serve
+    /// requests. Clear an old exhausted-balance marker even if the balance
+    /// poller has gone stale; the next native sample will refresh amounts.
+    pub fn clear_balance_exhaustion(&self, provider: &str, now: u64) {
+        let current = self.current();
+        let mut qs = QuotaState::clone(&current);
+        if let Some(entry) = qs.providers.get_mut(provider) {
+            entry.windows.retain(|w| w.label != "balance");
+            if let Some(balance) = entry.balance.as_mut() {
+                balance.available = true;
+            }
             entry.updated_unix = Some(now);
         }
         self.set(qs);
@@ -1265,6 +1286,43 @@ mod tests {
         map.explicit.insert("or".into(), "openrouter".into());
         let model = model_stub_with_id("or/deepseek/model");
         assert!(!model_available(&watcher.current(), &map, &model));
+    }
+
+    #[test]
+    fn exhausted_balance_stays_blocked_until_recovery_signal() {
+        let watcher = QuotaWatcher::default();
+        let now = unix_now();
+        watcher.apply_native(
+            "deepseek",
+            vec![QuotaWindow {
+                label: "balance".into(),
+                pct: 100.0,
+                reset_unix: None,
+                pace: None,
+            }],
+            Some(ProviderBalance {
+                available: false,
+                infos: vec![],
+            }),
+            now,
+        );
+        let stale = provider_availability(
+            watcher.current().providers.get("deepseek"),
+            true,
+            now + STALE_AFTER_SECS + 1,
+        );
+        assert_eq!(stale.score, 0.0, "staleness must not erase exhaustion");
+
+        watcher.clear_balance_exhaustion("deepseek", now + STALE_AFTER_SECS + 2);
+        let recovered = provider_availability(
+            watcher.current().providers.get("deepseek"),
+            false,
+            now + STALE_AFTER_SECS + 2,
+        );
+        assert!(
+            recovered.score > 0.0,
+            "successful inference clears the block"
+        );
     }
 
     #[test]
