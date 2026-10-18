@@ -33,6 +33,7 @@
 //!   `functionDeclarations.parameters`.
 
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 
 /// Google's JSON API surface. A model entry's `base_url` is this (or a
 /// proxy in front of it); the adapter appends `/models/{name}:generateContent`.
@@ -79,6 +80,24 @@ pub fn openai_to_gemini(body: &Value, model: &str) -> Result<Value, GeminiError>
     let mut system_parts: Vec<Value> = vec![];
     // (role, parts) — merged so roles strictly alternate (Google's rule).
     let mut turns: Vec<(String, Vec<Value>)> = vec![];
+    // OpenAI tool results refer to calls by opaque ID, while Gemini's
+    // functionResponse must repeat the function name.
+    let call_names: HashMap<&str, &str> = msgs
+        .iter()
+        .filter(|msg| msg.get("role").and_then(Value::as_str) == Some("assistant"))
+        .flat_map(|msg| {
+            msg.get("tool_calls")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|call| {
+            Some((
+                call.get("id")?.as_str()?,
+                call.pointer("/function/name")?.as_str()?,
+            ))
+        })
+        .collect();
 
     for msg in msgs {
         let role = msg.get("role").and_then(Value::as_str).unwrap_or("");
@@ -89,7 +108,7 @@ pub fn openai_to_gemini(body: &Value, model: &str) -> Result<Value, GeminiError>
             "user" => {
                 push_turn(&mut turns, "user", parts_of(msg.get("content")));
             }
-            "tool" => match function_response_part(msg) {
+            "tool" => match function_response_part(msg, &call_names) {
                 Some(part) => {
                     push_turn(&mut turns, "user", vec![part]);
                 }
@@ -276,12 +295,14 @@ fn function_call_part(call: &Value) -> Option<Value> {
 
 /// A `tool` result message → a `functionResponse` part. Google keys
 /// responses by *name*, so `tool_call_id` is the fallback name.
-fn function_response_part(msg: &Value) -> Option<Value> {
-    let name = msg.pointer("/name").and_then(Value::as_str).unwrap_or(
-        msg.pointer("/tool_call_id")
-            .and_then(Value::as_str)
-            .unwrap_or(""),
-    );
+fn function_response_part(msg: &Value, call_names: &HashMap<&str, &str>) -> Option<Value> {
+    let call_id = msg.pointer("/tool_call_id").and_then(Value::as_str);
+    let name = msg
+        .pointer("/name")
+        .and_then(Value::as_str)
+        .or_else(|| call_id.and_then(|id| call_names.get(id).copied()))
+        .or(call_id)
+        .unwrap_or("");
     if name.is_empty() {
         return None;
     }
@@ -390,12 +411,17 @@ fn tool_config(choice: Option<&Value>) -> Option<Value> {
             },
         }));
     }
-    match obj.get("type").and_then(Value::as_str).unwrap_or("") {
-        "none" => Some(json!({ "mode": "NONE" })),
-        "auto" => Some(json!({ "mode": "AUTO" })),
-        "required" | "any" => Some(json!({ "mode": "ANY" })),
-        _ => None,
-    }
+    let mode = match obj
+        .as_str()
+        .or_else(|| obj.get("type").and_then(Value::as_str))
+        .unwrap_or("")
+    {
+        "none" => "NONE",
+        "auto" => "AUTO",
+        "required" | "any" => "ANY",
+        _ => return None,
+    };
+    Some(json!({ "functionCallingConfig": { "mode": mode } }))
 }
 
 /// Sampling knobs onto `generationConfig`; OpenAI knobs with no Gemini
@@ -1343,10 +1369,10 @@ mod tests {
                 { "role": "system", "content": "be terse" },
                 { "role": "user", "content": "hi" },
                 { "role": "assistant", "content": null,
-                  "tool_calls": [{ "id": "c1", "type": "function",
+                  "tool_calls": [{ "id": "call_opaque_123", "type": "function",
                                    "function": { "name": "lookup",
                                                 "arguments": "{\"q\":\"x\"}" } }] },
-                { "role": "tool", "tool_call_id": "lookup", "content": "{\"n\":2}" },
+                { "role": "tool", "tool_call_id": "call_opaque_123", "content": "{\"n\":2}" },
                 { "role": "user", "content": "thanks" },
             ],
             "temperature": 0.3,
@@ -1367,6 +1393,10 @@ mod tests {
         assert_eq!(
             g["contents"][2]["parts"][0]["functionResponse"]["response"]["n"],
             2
+        );
+        assert_eq!(
+            g["contents"][2]["parts"][0]["functionResponse"]["name"],
+            "lookup"
         );
         assert_eq!(g["generationConfig"]["maxOutputTokens"], 64);
         assert_eq!(g["generationConfig"]["stopSequences"][0], "END");
@@ -1610,5 +1640,24 @@ mod tests {
                 .is_none(),
             "empty required arrays are dropped"
         );
+    }
+
+    #[test]
+    fn tool_choice_modes_use_gemini_function_calling_config() {
+        for (choice, mode) in [
+            (json!("auto"), "AUTO"),
+            (json!({"type":"auto"}), "AUTO"),
+            (json!("required"), "ANY"),
+            (json!({"type":"none"}), "NONE"),
+        ] {
+            let req = json!({
+                "messages": [{"role":"user","content":"call the tool"}],
+                "tools": [{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],
+                "tool_choice": choice,
+            });
+            let gemini = openai_to_gemini(&req, "gemini-3.8-flash-medium").unwrap();
+            assert_eq!(gemini["toolConfig"]["functionCallingConfig"]["mode"], mode);
+            assert!(gemini["toolConfig"].get("mode").is_none());
+        }
     }
 }
