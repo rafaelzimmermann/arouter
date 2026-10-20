@@ -57,8 +57,9 @@ Cross-pool targets still pass their own budget preflight.
 ## §3 Health and quota availability
 
 **Health** is a per-model circuit breaker: failure ratio over the recent
-window opens the breaker; cooldowns grow 30s → 2m → 8m → 30m; a success
-closes it. Failures and successes are recorded on every termination path,
+window opens the breaker; cooldowns grow 5s → 15s → 30s → 60s; the
+breaker stays open for 2m; a success closes it. Failures and successes are
+recorded on every termination path,
 including stream errors and client aborts.
 
 **Quota** state is per provider/panel. Windows carry a used percentage and

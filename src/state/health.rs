@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Exponential cooldown ladder + circuit thresholds. Defaults follow
-/// docs/routing.md (30s → 2m → 8m → 30m; open for 5m after > 30% failure
+/// docs/routing.md (5s → 15s → 30s → 60s; open for 2m after > 30% failure
 /// ratio over 1h with ≥ 8 samples).
 #[derive(Clone, Debug)]
 pub struct HealthPolicy {
@@ -29,12 +29,12 @@ impl Default for HealthPolicy {
     fn default() -> Self {
         Self {
             cooldown_steps: vec![
+                Duration::from_secs(5),
+                Duration::from_secs(15),
                 Duration::from_secs(30),
-                Duration::from_secs(120),
-                Duration::from_secs(480),
-                Duration::from_secs(1800),
+                Duration::from_secs(60),
             ],
-            circuit_open: Duration::from_secs(300),
+            circuit_open: Duration::from_secs(120),
             circuit_window: Duration::from_secs(3600),
             circuit_min_samples: 8,
             circuit_ratio: 0.30,
