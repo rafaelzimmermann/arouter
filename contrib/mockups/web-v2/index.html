@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>arouter web console — rework mockups</title>
+<style>
+:root { color-scheme: dark; --bg:#0D1117; --panel:#161B22; --line:#30363D; --txt:#E6EDF3; --dim:#8B949E; --blue:#58A6FF; }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--txt); font:14px/1.55 -apple-system,'Segoe UI',sans-serif; }
+header { padding:48px 6vw 24px; border-bottom:1px solid var(--line); }
+header h1 { margin:0 0 8px; font-size:30px; }
+header p { margin:0; color:var(--dim); max-width:78ch; }
+header a { color:var(--blue); }
+nav { padding:20px 6vw; display:flex; gap:8px; flex-wrap:wrap; border-bottom:1px solid var(--line); }
+nav a { color:var(--dim); text-decoration:none; border:1px solid var(--line); padding:5px 10px; border-radius:5px; font-size:12px; }
+nav a:hover { color:var(--txt); border-color:var(--blue); }
+main { padding:24px 6vw 80px; }
+.shot { margin:0 0 56px; }
+.meta { display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; margin:0 0 10px; }
+.meta h2 { margin:0; font-size:18px; }
+.meta p { margin:0; color:var(--dim); flex:1; min-width:280px; }
+.meta code { color:#6E7681; font-size:11px; }
+.shot img { display:block; width:100%; height:auto; border:1px solid var(--line); border-radius:12px; background:#0D1117; }
+</style></head>
+<body>
+<header>
+  <h1>arouter web console — rework mockups</h1>
+  <p>A configuration surface rather than a status page. The overview starts with what needs a decision; every change is staged, sourced and previewed before it is applied. Dashed items in the flow are planned UI, not current capability.</p>
+  <p style="margin-top:10px"><a href="README.md">Feature list and implementation notes</a> · <a href="../../../docs/web-console-rework.md">product brief</a></p>
+</header>
+<nav><a href="00-user-flow.svg">User flow</a><a href="01-setup.svg">First access</a><a href="02-overview.svg">Overview</a><a href="03-models.svg">Models</a><a href="03a-add-model.svg">Add model</a><a href="04-providers.svg">Providers &amp; quota</a><a href="05-routing.svg">Routing</a><a href="06-keys.svg">API keys</a><a href="07-settings.svg">Settings</a><a href="08-mobile.svg">Mobile</a></nav>
+<main>
+    <section class="shot">
+      <div class="meta"><h2>User flow</h2><p>Setup → observe → diagnose/change → verify. Includes the first-run and day-2 paths.</p><code>web-v2/00-user-flow.svg</code></div>
+      <a href="00-user-flow.svg"><img src="00-user-flow.svg" alt="User flow mockup"></a>
+    </section>
+    <section class="shot">
+      <div class="meta"><h2>First access</h2><p>Admin creation with an explicit warning while the console is unclaimed.</p><code>web-v2/01-setup.svg</code></div>
+      <a href="01-setup.svg"><img src="01-setup.svg" alt="First access mockup"></a>
+    </section>
+    <section class="shot">
+      <div class="meta"><h2>Overview</h2><p>Health, spend, quota headroom, attention queue, recent changes and verification.</p><code>web-v2/02-overview.svg</code></div>
+      <a href="02-overview.svg"><img src="02-overview.svg" alt="Overview mockup"></a>
+    </section>
+    <section class="shot">
+      <div class="meta"><h2>Models</h2><p>Search and filter, inspect, stage enable/weight changes, review impact, apply.</p><code>web-v2/03-models.svg</code></div>
+      <a href="03-models.svg"><img src="03-models.svg" alt="Models mockup"></a>
+    </section>
+    <section class="shot">
+      <div class="meta"><h2>Add model</h2><p>Discovery or manual addition with validation, cost guard and routing preview.</p><code>web-v2/03a-add-model.svg</code></div>
+      <a href="03a-add-model.svg"><img src="03a-add-model.svg" alt="Add model mockup"></a>
+    </section>
+    <section class="shot">
+      <div class="meta"><h2>Providers &amp; quota</h2><p>Native balance/windows, staleness, manual override and routing impact preview.</p><code>web-v2/04-providers.svg</code></div>
+      <a href="04-providers.svg"><img src="04-providers.svg" alt="Providers &amp; quota mockup"></a>
+    </section>
+    <section class="shot">
+      <div class="meta"><h2>Routing</h2><p>Profiles, pool order, fallback policy and a read-only request simulator.</p><code>web-v2/05-routing.svg</code></div>
+      <a href="05-routing.svg"><img src="05-routing.svg" alt="Routing mockup"></a>
+    </section>
+    <section class="shot">
+      <div class="meta"><h2>API keys</h2><p>Scoped keys, one-time secret, budget, last use and revocation.</p><code>web-v2/06-keys.svg</code></div>
+      <a href="06-keys.svg"><img src="06-keys.svg" alt="API keys mockup"></a>
+    </section>
+    <section class="shot">
+      <div class="meta"><h2>Settings</h2><p>Config sources, effective config, validation/reload and admin security.</p><code>web-v2/07-settings.svg</code></div>
+      <a href="07-settings.svg"><img src="07-settings.svg" alt="Settings mockup"></a>
+    </section>
+    <section class="shot">
+      <div class="meta"><h2>Mobile</h2><p>The same flow with thumb-first controls and sticky apply bars.</p><code>web-v2/08-mobile.svg</code></div>
+      <a href="08-mobile.svg"><img src="08-mobile.svg" alt="Mobile mockup"></a>
+    </section>
+</main>
+</body></html>

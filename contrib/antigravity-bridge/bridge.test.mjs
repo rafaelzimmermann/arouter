@@ -2,7 +2,7 @@
 // The CLI is injected, so these tests never spawn `agy`.
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { createBridge } from './bridge.mjs';
+import { cliArgs, createBridge } from './bridge.mjs';
 
 const KEY = 'a'.repeat(40);
 const MODELS = ['gemini-3.8-flash-low'];
@@ -48,7 +48,7 @@ test('plain text chat still works', async () => {
   }
 });
 
-test('generationConfig is accepted; effort maps to --effort', async () => {
+test('generationConfig is accepted; effort maps to --effort only when model has no suffix', async () => {
   const cli = fakeCli(plainResult);
   const { origin, close } = await serve(cli.run);
   try {
@@ -59,6 +59,8 @@ test('generationConfig is accepted; effort maps to --effort', async () => {
     assert.equal(status, 200, 'maxOutputTokens must not 501 the request');
     assert.equal(cli.calls[0].effort, 'high');
     assert.equal(cli.calls[0].jsonSchema, null);
+    assert.ok(!cliArgs({ model: 'gemini-3.8-flash-high', prompt: 'hi', timeoutMs: 30_000, effort: 'medium' }).includes('--effort'));
+    assert.ok(cliArgs({ model: 'gemini-3.8-flash', prompt: 'hi', timeoutMs: 30_000, effort: 'medium' }).includes('--effort'));
   } finally {
     close();
   }
@@ -81,12 +83,53 @@ test('tool declarations become a JSON schema and functionCall parts', async () =
     const schema = cli.calls[0].jsonSchema;
     assert.equal(schema.properties.tool_calls.items.properties.name.enum[0], 'get_weather');
     assert.match(cli.calls[0].prompt, /get_weather/);
+    assert.match(cli.calls[0].prompt, /finish/);
     assert.deepEqual(body.candidates[0].content.parts, [
       { text: 'let me check' },
       { functionCall: { name: 'get_weather', args: { city: 'Paris' } } },
     ]);
   } finally {
     close();
+  }
+});
+
+test('tool mode falls back to parsing JSON envelope from response and rejects empty turns', async () => {
+  const cli = fakeCli({
+    status: 'SUCCESS',
+    response: '```json\n{"text":"Running tests.","tool_calls":[{"name":"bash","arguments":{"command":"cargo test"}}]}\n```',
+    usage: { input_tokens: 10, output_tokens: 4, total_tokens: 14 },
+  });
+  const { origin, close } = await serve(cli.run);
+  try {
+    const { status, body } = await generate(origin, {
+      contents: [
+        { role: 'user', parts: [{ text: 'run tests' }] },
+        { role: 'model', parts: [{ text: '{"text":"Checking.","tool_calls":[{"name":"bash","arguments":{"command":"git status"}}]}' }] },
+        { role: 'user', parts: [{ text: 'continue' }] },
+      ],
+      tools: [{ functionDeclarations: [{ name: 'bash', description: 'Run shell', parameters: { type: 'object' } }] }],
+    });
+    assert.equal(status, 200);
+    assert.match(cli.calls[0].prompt, /Assistant called bash\(\{"command":"git status"\}\)/);
+    assert.deepEqual(body.candidates[0].content.parts, [
+      { text: 'Running tests.' },
+      { functionCall: { name: 'bash', args: { command: 'cargo test' } } },
+    ]);
+  } finally {
+    close();
+  }
+
+  const emptyCli = fakeCli({
+    status: 'SUCCESS', response: '', usage: { input_tokens: 5, output_tokens: 0, total_tokens: 5 },
+  });
+  const emptySrv = await serve(emptyCli.run);
+  try {
+    const { status } = await generate(emptySrv.origin, {
+      contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+    });
+    assert.equal(status, 502, 'empty CLI output must fail over instead of returning blank 200');
+  } finally {
+    emptySrv.close();
   }
 });
 

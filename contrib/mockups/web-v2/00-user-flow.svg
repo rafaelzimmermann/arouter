@@ -1,0 +1,152 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 900" width="1280" height="900" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif"><rect x="0" y="0" width="1280" height="900" rx="0" fill="#0D1117"/>
+<polygon points="54,34 66,44 54,54 42,44" fill="#2DD4BF"/>
+<text x="76" y="50" text-anchor="start" font-size="21" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">arouter</text>
+<rect x="182" y="35" width="132.0" height="22" rx="4" fill="#58A6FF" opacity="0.14"/>
+<text x="248.0" y="47" text-anchor="middle" font-size="10" fill="#58A6FF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">web console · rework</text>
+<text x="1196" y="50" text-anchor="end" font-size="11" fill="#6E7681" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">mockup 00 · user flow</text>
+<text x="48" y="112" text-anchor="start" font-size="30" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">From first access to a confident change</text>
+<text x="48" y="140" text-anchor="start" font-size="13" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">One flow for setup, diagnosis and configuration. Every screen answers: what is wrong, what will change, and how do I verify it?</text>
+<rect x="48" y="178" width="276" height="226" rx="12" fill="#161B22" stroke="#30363D"/>
+<circle cx="82" cy="212" r="17" fill="#58A6FF" opacity="0.16"/>
+<text x="82" y="217" text-anchor="middle" font-size="14" fill="#58A6FF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">1</text>
+<text x="108" y="217" text-anchor="start" font-size="16" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">First access</text>
+<text x="66" y="250" text-anchor="start" font-size="11" fill="#58A6FF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">Setup that cannot be missed</text>
+<circle cx="72" cy="278" r="2.5" fill="#58A6FF"/>
+<text x="84" y="282" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">Open the console</text>
+<circle cx="72" cy="304" r="2.5" fill="#58A6FF"/>
+<text x="84" y="308" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">Create the admin account</text>
+<circle cx="72" cy="330" r="2.5" fill="#58A6FF"/>
+<text x="84" y="334" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">Session starts immediately</text>
+<circle cx="72" cy="356" r="2.5" fill="#58A6FF"/>
+<text x="84" y="360" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">Checklist: provider → model → key</text>
+<line x1="332" y1="291" x2="352" y2="291" stroke="#30363D" stroke-width="1.5"/>
+<polygon points="356,291 348,286 348,296" fill="#30363D"/>
+<rect x="364" y="178" width="276" height="226" rx="12" fill="#161B22" stroke="#30363D"/>
+<circle cx="398" cy="212" r="17" fill="#2DD4BF" opacity="0.16"/>
+<text x="398" y="217" text-anchor="middle" font-size="14" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">2</text>
+<text x="424" y="217" text-anchor="start" font-size="16" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">Observe</text>
+<text x="382" y="250" text-anchor="start" font-size="11" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">One page for the current truth</text>
+<circle cx="388" cy="278" r="2.5" fill="#2DD4BF"/>
+<text x="400" y="282" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">Serving / degraded banner</text>
+<circle cx="388" cy="304" r="2.5" fill="#2DD4BF"/>
+<text x="400" y="308" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">Spend, errors, quota headroom</text>
+<circle cx="388" cy="330" r="2.5" fill="#2DD4BF"/>
+<text x="400" y="334" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">“Needs attention” queue</text>
+<circle cx="388" cy="356" r="2.5" fill="#2DD4BF"/>
+<text x="400" y="360" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">Recent changes and who made them</text>
+<line x1="648" y1="291" x2="668" y2="291" stroke="#30363D" stroke-width="1.5"/>
+<polygon points="672,291 664,286 664,296" fill="#30363D"/>
+<rect x="680" y="178" width="276" height="226" rx="12" fill="#161B22" stroke="#30363D"/>
+<circle cx="714" cy="212" r="17" fill="#E3B341" opacity="0.16"/>
+<text x="714" y="217" text-anchor="middle" font-size="14" fill="#E3B341" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">3</text>
+<text x="740" y="217" text-anchor="start" font-size="16" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">Diagnose &amp; change</text>
+<text x="698" y="250" text-anchor="start" font-size="11" fill="#E3B341" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">Edit only what is understood</text>
+<circle cx="704" cy="278" r="2.5" fill="#E3B341"/>
+<text x="716" y="282" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">Inspect model / provider detail</text>
+<circle cx="704" cy="304" r="2.5" fill="#E3B341"/>
+<text x="716" y="308" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">See config source and health</text>
+<circle cx="704" cy="330" r="2.5" fill="#E3B341"/>
+<text x="716" y="334" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">Stage a change, preview impact</text>
+<circle cx="704" cy="356" r="2.5" fill="#E3B341"/>
+<text x="716" y="360" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">Never save blindly</text>
+<line x1="964" y1="291" x2="984" y2="291" stroke="#30363D" stroke-width="1.5"/>
+<polygon points="988,291 980,286 980,296" fill="#30363D"/>
+<rect x="996" y="178" width="276" height="226" rx="12" fill="#161B22" stroke="#30363D"/>
+<circle cx="1030" cy="212" r="17" fill="#3FB950" opacity="0.16"/>
+<text x="1030" y="217" text-anchor="middle" font-size="14" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">4</text>
+<text x="1056" y="217" text-anchor="start" font-size="16" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">Verify</text>
+<text x="1014" y="250" text-anchor="start" font-size="11" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">Close the loop</text>
+<circle cx="1020" cy="278" r="2.5" fill="#3FB950"/>
+<text x="1032" y="282" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">Apply with a change summary</text>
+<circle cx="1020" cy="304" r="2.5" fill="#3FB950"/>
+<text x="1032" y="308" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">Watch health + error rate</text>
+<circle cx="1020" cy="330" r="2.5" fill="#3FB950"/>
+<text x="1032" y="334" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">Copy a sample request</text>
+<circle cx="1020" cy="356" r="2.5" fill="#3FB950"/>
+<text x="1032" y="360" text-anchor="start" font-size="11" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">Audit entry in recent changes</text>
+<text x="48" y="458" text-anchor="start" font-size="10" fill="#6E7681" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" letter-spacing="0.12em">FIRST-RUN PATH</text>
+<rect x="48" y="476" width="176" height="86" rx="8" fill="#1B222C" stroke="#30363D"/>
+<text x="62" y="501" text-anchor="start" font-size="12" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">Open URL</text>
+<text x="62" y="520" text-anchor="start" font-size="9" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">no admin yet</text>
+<text x="210" y="545" text-anchor="end" font-size="8" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">current</text>
+<text x="232" y="522" text-anchor="start" font-size="14" fill="#6E7681" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">→</text>
+<rect x="244" y="476" width="176" height="86" rx="8" fill="#1B222C" stroke="#30363D"/>
+<text x="258" y="501" text-anchor="start" font-size="12" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">Create admin</text>
+<text x="258" y="520" text-anchor="start" font-size="9" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">Argon2id · 0600</text>
+<text x="406" y="545" text-anchor="end" font-size="8" fill="#3FB950" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">current</text>
+<text x="428" y="522" text-anchor="start" font-size="14" fill="#6E7681" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">→</text>
+<rect x="440" y="476" width="176" height="86" rx="8" fill="#1B222C"/>
+<rect x="440" y="476" width="176" height="86" rx="8" fill="none" stroke="#30363D" stroke-dasharray="4 4"/>
+<text x="454" y="501" text-anchor="start" font-size="12" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">Connect provider</text>
+<text x="454" y="520" text-anchor="start" font-size="9" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">native or manual</text>
+<text x="602" y="545" text-anchor="end" font-size="8" fill="#E3B341" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">planned UI</text>
+<text x="624" y="522" text-anchor="start" font-size="14" fill="#6E7681" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">→</text>
+<rect x="636" y="476" width="176" height="86" rx="8" fill="#1B222C"/>
+<rect x="636" y="476" width="176" height="86" rx="8" fill="none" stroke="#30363D" stroke-dasharray="4 4"/>
+<text x="650" y="501" text-anchor="start" font-size="12" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">Pick models</text>
+<text x="650" y="520" text-anchor="start" font-size="9" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">discovery + overlay</text>
+<text x="798" y="545" text-anchor="end" font-size="8" fill="#E3B341" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">planned UI</text>
+<text x="820" y="522" text-anchor="start" font-size="14" fill="#6E7681" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">→</text>
+<rect x="832" y="476" width="176" height="86" rx="8" fill="#1B222C"/>
+<rect x="832" y="476" width="176" height="86" rx="8" fill="none" stroke="#30363D" stroke-dasharray="4 4"/>
+<text x="846" y="501" text-anchor="start" font-size="12" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">Create first key</text>
+<text x="846" y="520" text-anchor="start" font-size="9" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">scopes + budget</text>
+<text x="994" y="545" text-anchor="end" font-size="8" fill="#E3B341" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">planned UI</text>
+<text x="1016" y="522" text-anchor="start" font-size="14" fill="#6E7681" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">→</text>
+<rect x="1028" y="476" width="176" height="86" rx="8" fill="#1B222C"/>
+<rect x="1028" y="476" width="176" height="86" rx="8" fill="none" stroke="#30363D" stroke-dasharray="4 4"/>
+<text x="1042" y="501" text-anchor="start" font-size="12" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">Send test</text>
+<text x="1042" y="520" text-anchor="start" font-size="9" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">verify in overview</text>
+<text x="1190" y="545" text-anchor="end" font-size="8" fill="#E3B341" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">planned UI</text>
+<text x="48" y="606" text-anchor="start" font-size="10" fill="#6E7681" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" letter-spacing="0.12em">DAY-2 PATH</text>
+<rect x="48" y="624" width="156" height="84" rx="8" fill="#161B22" stroke="#30363D"/>
+<text x="61" y="650" text-anchor="start" font-size="12" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">Sign in</text>
+<text x="61" y="669" text-anchor="start" font-size="9" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">session cookie</text>
+<text x="61" y="692" text-anchor="start" font-size="9" fill="#58A6FF" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">01</text>
+<text x="209" y="668" text-anchor="start" font-size="13" fill="#6E7681" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">→</text>
+<rect x="220" y="624" width="156" height="84" rx="8" fill="#161B22" stroke="#30363D"/>
+<text x="233" y="650" text-anchor="start" font-size="12" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">Overview</text>
+<text x="233" y="669" text-anchor="start" font-size="9" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">attention queue</text>
+<text x="233" y="692" text-anchor="start" font-size="9" fill="#58A6FF" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">02</text>
+<text x="381" y="668" text-anchor="start" font-size="13" fill="#6E7681" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">→</text>
+<rect x="392" y="624" width="156" height="84" rx="8" fill="#161B22" stroke="#30363D"/>
+<text x="405" y="650" text-anchor="start" font-size="12" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">Open item</text>
+<text x="405" y="669" text-anchor="start" font-size="9" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">model or provider</text>
+<text x="405" y="692" text-anchor="start" font-size="9" fill="#58A6FF" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">03</text>
+<text x="553" y="668" text-anchor="start" font-size="13" fill="#6E7681" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">→</text>
+<rect x="564" y="624" width="156" height="84" rx="8" fill="#161B22" stroke="#30363D"/>
+<text x="577" y="650" text-anchor="start" font-size="12" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">Stage edit</text>
+<text x="577" y="669" text-anchor="start" font-size="9" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">source + impact</text>
+<text x="577" y="692" text-anchor="start" font-size="9" fill="#58A6FF" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">04</text>
+<text x="725" y="668" text-anchor="start" font-size="13" fill="#6E7681" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">→</text>
+<rect x="736" y="624" width="156" height="84" rx="8" fill="#161B22" stroke="#30363D"/>
+<text x="749" y="650" text-anchor="start" font-size="12" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">Review</text>
+<text x="749" y="669" text-anchor="start" font-size="9" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">dry-run summary</text>
+<text x="749" y="692" text-anchor="start" font-size="9" fill="#58A6FF" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">05</text>
+<text x="897" y="668" text-anchor="start" font-size="13" fill="#6E7681" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">→</text>
+<rect x="908" y="624" width="156" height="84" rx="8" fill="#161B22" stroke="#30363D"/>
+<text x="921" y="650" text-anchor="start" font-size="12" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">Apply</text>
+<text x="921" y="669" text-anchor="start" font-size="9" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">same-origin write</text>
+<text x="921" y="692" text-anchor="start" font-size="9" fill="#58A6FF" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">06</text>
+<text x="1069" y="668" text-anchor="start" font-size="13" fill="#6E7681" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">→</text>
+<rect x="1080" y="624" width="156" height="84" rx="8" fill="#161B22" stroke="#30363D"/>
+<text x="1093" y="650" text-anchor="start" font-size="12" fill="#E6EDF3" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">Verify</text>
+<text x="1093" y="669" text-anchor="start" font-size="9" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">health + sample</text>
+<text x="1093" y="692" text-anchor="start" font-size="9" fill="#58A6FF" font-family="'JetBrains Mono','Fira Code',Consolas,'DejaVu Sans Mono',monospace">07</text>
+<rect x="48" y="750" width="1184" height="102" rx="10" fill="#1B222C" stroke="#30363D"/>
+<text x="66" y="778" text-anchor="start" font-size="10" fill="#6E7681" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" letter-spacing="0.12em">DESIGN RULES</text>
+<text x="66" y="806" text-anchor="start" font-size="11" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">Attention first</text>
+<text x="66" y="826" text-anchor="start" font-size="9" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">the overview starts with what needs a decision</text>
+<line x1="280" y1="792" x2="280" y2="834" stroke="#30363D" stroke-width="1"/>
+<text x="296" y="806" text-anchor="start" font-size="11" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">Source visible</text>
+<text x="296" y="826" text-anchor="start" font-size="9" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">manual / discovery / overlay is always labelled</text>
+<line x1="510" y1="792" x2="510" y2="834" stroke="#30363D" stroke-width="1"/>
+<text x="526" y="806" text-anchor="start" font-size="11" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">Stage, then apply</text>
+<text x="526" y="826" text-anchor="start" font-size="9" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">preview impact before any write</text>
+<line x1="740" y1="792" x2="740" y2="834" stroke="#30363D" stroke-width="1"/>
+<text x="756" y="806" text-anchor="start" font-size="11" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">Secrets once</text>
+<text x="756" y="826" text-anchor="start" font-size="9" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">plaintext key shown a single time</text>
+<line x1="970" y1="792" x2="970" y2="834" stroke="#30363D" stroke-width="1"/>
+<text x="986" y="806" text-anchor="start" font-size="11" fill="#2DD4BF" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif" font-weight="bold">No dead ends</text>
+<text x="986" y="826" text-anchor="start" font-size="9" fill="#8B949E" font-family="-apple-system,'Segoe UI','Noto Sans',sans-serif">every empty state has the next action</text>
+</svg>

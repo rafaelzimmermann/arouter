@@ -638,19 +638,56 @@ fn candidate_parts(cand: &Value) -> (String, String, Vec<Value>) {
 }
 
 /// Gemini's bridge can put a chat-shaped `{text, tool_calls}` object in a
-/// text part while also returning the real calls as `functionCall` parts.
-/// Expose only the human text when both representations agree on call names.
-fn unwrap_tool_call_envelope(text: &str, calls: &[Value]) -> Option<String> {
-    if calls.is_empty() {
-        return None;
-    }
-    let envelope: Value = serde_json::from_str(text.trim()).ok()?;
+/// text part — either alongside `functionCall` parts or as the sole part when
+/// the upstream CLI emitted a raw JSON envelope instead of structured output.
+/// Expose the human text and populate `calls` when structured calls are missing.
+fn unwrap_tool_call_envelope(text: &str, calls: &mut Vec<Value>) -> Option<String> {
+    let trimmed = text.trim();
+    let json_text = trimmed
+        .strip_prefix("```")
+        .and_then(|rest| {
+            let after_lang = rest.split_once('\n').map(|(_, body)| body).unwrap_or(rest);
+            after_lang.trim().strip_suffix("```").map(str::trim)
+        })
+        .unwrap_or(trimmed);
+    let envelope: Value = serde_json::from_str(json_text).ok()?;
     let human_text = envelope.get("text")?.as_str()?;
     let wrapped_calls = envelope.get("tool_calls")?.as_array()?;
+    if calls.is_empty() {
+        if wrapped_calls.is_empty() {
+            return None;
+        }
+        let mut extracted = Vec::with_capacity(wrapped_calls.len());
+        for (i, wrapped) in wrapped_calls.iter().enumerate() {
+            let name = wrapped
+                .pointer("/function/name")
+                .or_else(|| wrapped.get("name"))
+                .and_then(Value::as_str)?;
+            if name.is_empty() {
+                return None;
+            }
+            let raw_args = wrapped
+                .pointer("/function/arguments")
+                .or_else(|| wrapped.get("arguments"))
+                .or_else(|| wrapped.get("args"));
+            let args = match raw_args {
+                None | Some(Value::Null) => "{}".to_string(),
+                Some(Value::String(s)) => s.clone(),
+                Some(v) => v.to_string(),
+            };
+            extracted.push(json!({
+                "id": format!("call-{}-{}", i, name),
+                "type": "function",
+                "function": { "name": name, "arguments": args },
+            }));
+        }
+        *calls = extracted;
+        return Some(human_text.to_string());
+    }
     if wrapped_calls.len() != calls.len() {
         return None;
     }
-    for (wrapped, actual) in wrapped_calls.iter().zip(calls) {
+    for (wrapped, actual) in wrapped_calls.iter().zip(calls.iter()) {
         let wrapped_name = wrapped
             .pointer("/function/name")
             .or_else(|| wrapped.get("name"))
@@ -687,8 +724,8 @@ pub fn gemini_to_openai(resp: &Value, model: &str) -> Result<Value, String> {
         }
         return Err("gemini returned no candidates".into());
     }
-    let (mut text, reasoning, calls) = candidate_parts(&candidates[0]);
-    if let Some(unwrapped) = unwrap_tool_call_envelope(&text, &calls) {
+    let (mut text, reasoning, mut calls) = candidate_parts(&candidates[0]);
+    if let Some(unwrapped) = unwrap_tool_call_envelope(&text, &mut calls) {
         text = unwrapped;
     }
     let finish = map_finish_reason(
@@ -823,7 +860,8 @@ impl GeminiParser {
         let mut deltas: Vec<Delta> = vec![];
         if !text.is_empty() {
             self.text += &text;
-            if !self.defer_text && self.text.trim_start().starts_with('{') {
+            let trimmed = self.text.trim_start();
+            if !self.defer_text && (trimmed.starts_with('{') || trimmed.starts_with("```")) {
                 self.defer_text = true;
             }
             if !self.defer_text {
@@ -836,16 +874,17 @@ impl GeminiParser {
         }
         self.tool_calls.extend(calls);
         if let Some(r) = cands[0].get("finishReason").and_then(Value::as_str) {
-            self.finish_reason = Some(map_finish_reason(r, !self.tool_calls.is_empty()));
-            self.terminal = true;
             if self.defer_text {
-                if let Some(unwrapped) = unwrap_tool_call_envelope(&self.text, &self.tool_calls) {
+                if let Some(unwrapped) = unwrap_tool_call_envelope(&self.text, &mut self.tool_calls)
+                {
                     self.text = unwrapped;
                 }
                 if !self.text.is_empty() {
                     deltas.push(Delta::Text(self.text.clone()));
                 }
             }
+            self.finish_reason = Some(map_finish_reason(r, !self.tool_calls.is_empty()));
+            self.terminal = true;
         }
         Ok(deltas)
     }
@@ -1636,6 +1675,42 @@ mod tests {
         let deltas = parser.event(&response).unwrap();
         let frames = parser.chunks_for(deltas).concat();
         assert!(frames.contains("Searching now."), "{frames}");
+        assert!(!frames.contains("\"tool_calls\":[{\"name\""), "{frames}");
+        assert!(
+            frames.contains("\"finish_reason\":\"tool_calls\""),
+            "{frames}"
+        );
+    }
+
+    #[test]
+    fn unwraps_bridge_tool_call_envelope_without_function_call_parts() {
+        let envelope = json!({
+            "text": "Reading file.",
+            "tool_calls": [{ "name": "read", "arguments": { "path": "README.md" } }],
+        })
+        .to_string();
+        let response = json!({
+            "candidates": [{
+                "content": { "parts": [{ "text": envelope }] },
+                "finishReason": "STOP",
+            }],
+        });
+        let buffered = gemini_to_openai(&response, "gemini").unwrap();
+        assert_eq!(buffered["choices"][0]["message"]["content"], "Reading file.");
+        assert_eq!(buffered["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(
+            buffered["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+            "read"
+        );
+        assert_eq!(
+            buffered["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
+            "{\"path\":\"README.md\"}"
+        );
+
+        let mut parser = GeminiParser::new("gemini");
+        let deltas = parser.event(&response).unwrap();
+        let frames = parser.chunks_for(deltas).concat();
+        assert!(frames.contains("Reading file."), "{frames}");
         assert!(!frames.contains("\"tool_calls\":[{\"name\""), "{frames}");
         assert!(
             frames.contains("\"finish_reason\":\"tool_calls\""),

@@ -79,6 +79,37 @@ function toolDeclarations(input) {
   return decls;
 }
 
+function parseToolEnvelope(raw) {
+  if (typeof raw !== 'string') return null;
+  let trimmed = raw.trim();
+  const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(trimmed);
+  if (fenced) trimmed = fenced[1].trim();
+  if (!trimmed.startsWith('{')) return null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    if (typeof parsed.text !== 'string' && !Array.isArray(parsed.tool_calls)) return null;
+    const calls = Array.isArray(parsed.tool_calls)
+      ? parsed.tool_calls
+        .map((c) => {
+          const fn = c?.function && typeof c.function === 'object' ? c.function : c;
+          const name = typeof fn?.name === 'string' ? fn.name : '';
+          if (!name) return null;
+          let args = fn.arguments ?? fn.args ?? {};
+          if (typeof args === 'string') {
+            try { args = JSON.parse(args); } catch { args = {}; }
+          }
+          if (!args || typeof args !== 'object' || Array.isArray(args)) args = {};
+          return { name, arguments: args };
+        })
+        .filter(Boolean)
+      : [];
+    return { text: typeof parsed.text === 'string' ? parsed.text : '', tool_calls: calls };
+  } catch {
+    return null;
+  }
+}
+
 function promptFromGoogle(input) {
   if (!Array.isArray(input.contents) || input.contents.length === 0) throw bad('contents must be a non-empty array');
   const blocks = [];
@@ -94,7 +125,15 @@ function promptFromGoogle(input) {
     const text = [];
     for (const part of turn.parts) {
       if (typeof part.text === 'string') {
-        text.push(part.text);
+        const env = turn.role === 'model' ? parseToolEnvelope(part.text) : null;
+        if (env && env.tool_calls.length) {
+          if (env.text.trim()) text.push(env.text);
+          for (const call of env.tool_calls) {
+            text.push(`Assistant called ${call.name}(${JSON.stringify(call.arguments ?? {})})`);
+          }
+        } else if (part.text) {
+          text.push(part.text);
+        }
       } else if (part.functionCall) {
         text.push(`Assistant called ${part.functionCall.name}(${JSON.stringify(part.functionCall.args ?? {})})`);
       } else if (part.functionResponse) {
@@ -103,7 +142,7 @@ function promptFromGoogle(input) {
         throw bad('Antigravity bridge supports text and tool parts only', 501);
       }
     }
-    blocks.push(`${turn.role === 'model' ? 'Assistant' : 'User'}:\n${text.join('\n')}`);
+    if (text.length) blocks.push(`${turn.role === 'model' ? 'Assistant' : 'User'}:\n${text.join('\n')}`);
   }
   // Keep this a single model answer. In particular, never pass client content
   // as an instruction to use Antigravity's filesystem, terminal, or MCP tools.
@@ -112,13 +151,20 @@ function promptFromGoogle(input) {
 }
 
 // The JSON contract for emulated function calling: prose in `text`, calls in
-// `tool_calls`. `--json-schema` makes the CLI return `structured_output`.
+// `tool_calls`. `--json-schema` makes the CLI register a `finish` tool that
+// returns `structured_output`.
 function toolInstruction(decls) {
   const lines = decls.map((d) => `- ${d.name}: ${d.description}\n  parameters: ${JSON.stringify(d.parameters)}`);
-  return ['You may call the functions below, but you cannot execute them.',
-    'Answer as JSON. Put prose in "text"; to call functions add "tool_calls"',
-    '(an array of {"name", "arguments"}). Use only the listed names.',
-    'Functions:', ...lines].join('\n');
+  return [
+    'You are answering one turn for an external client harness that executes the client functions below.',
+    'Do NOT call built-in Antigravity tools (such as run_command, view_file, list_dir, grep_search, write_to_file, or replace_file_content).',
+    'Respond immediately by calling the "finish" tool once (do not write raw JSON as plain text):',
+    '- Put any assistant prose in "text".',
+    '- To call client functions, put them in "tool_calls" as an array of {"name", "arguments"} using only the listed function names.',
+    '- If no client function call is needed, set "tool_calls" to [].',
+    'Client functions:',
+    ...lines,
+  ].join('\n');
 }
 
 function toolResponseSchema(decls) {
@@ -141,12 +187,20 @@ function toolResponseSchema(decls) {
   };
 }
 
+// Models whose name already encodes an effort suffix (e.g. gemini-3.8-flash-high)
+// are rejected by `agy` if a conflicting `--effort` flag is also passed.
+export function cliArgs({ model, prompt, timeoutMs, effort, jsonSchema }) {
+  const args = ['--print', prompt, '--model', model, '--output-format', 'json',
+    '--print-timeout', `${Math.ceil(timeoutMs / 1000)}s`, '--sandbox', '--disable-slash-commands'];
+  const modelHasEffort = /-(?:low|medium|high|xhigh|max)$/i.test(model);
+  if (effort && !modelHasEffort) args.push('--effort', effort);
+  if (jsonSchema) args.push('--json-schema', JSON.stringify(jsonSchema));
+  return args;
+}
+
 function runCli({ cli, model, prompt, cwd, timeoutMs, signal, effort, jsonSchema }) {
   return new Promise((resolve, reject) => {
-    const args = ['--print', prompt, '--model', model, '--output-format', 'json',
-      '--print-timeout', `${Math.ceil(timeoutMs / 1000)}s`, '--sandbox', '--mode', 'plan', '--disable-slash-commands'];
-    if (effort) args.push('--effort', effort);
-    if (jsonSchema) args.push('--json-schema', JSON.stringify(jsonSchema));
+    const args = cliArgs({ model, prompt, timeoutMs, effort, jsonSchema });
     const child = spawn(cli, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: process.env });
     let stdout = '';
     let stderr = '';
@@ -176,20 +230,36 @@ function runCli({ cli, model, prompt, cwd, timeoutMs, signal, effort, jsonSchema
 function googleResponse(result, model, { toolMode = false, structured = null } = {}) {
   const parts = [];
   if (toolMode) {
-    const out = result.structured_output ?? {};
+    let out = result.structured_output && typeof result.structured_output === 'object'
+      ? result.structured_output
+      : null;
+    const fallback = parseToolEnvelope(result.response);
+    if (!out || (typeof out.text !== 'string' && !Array.isArray(out.tool_calls))) {
+      out = fallback ?? {};
+    } else if ((!Array.isArray(out.tool_calls) || !out.tool_calls.length) && typeof out.text === 'string') {
+      const nested = parseToolEnvelope(out.text);
+      if (nested && nested.tool_calls.length) out = nested;
+    }
     if (typeof out.text === 'string' && out.text.trim()) parts.push({ text: out.text });
     for (const call of Array.isArray(out.tool_calls) ? out.tool_calls : []) {
-      if (typeof call?.name !== 'string' || !call.name) continue;
-      const args = call.arguments && typeof call.arguments === 'object' ? call.arguments : {};
-      parts.push({ functionCall: { name: call.name, args } });
+      const fn = call?.function && typeof call.function === 'object' ? call.function : call;
+      if (typeof fn?.name !== 'string' || !fn.name) continue;
+      let args = fn.arguments ?? fn.args ?? {};
+      if (typeof args === 'string') {
+        try { args = JSON.parse(args); } catch { args = {}; }
+      }
+      if (!args || typeof args !== 'object' || Array.isArray(args)) args = {};
+      parts.push({ functionCall: { name: fn.name, args } });
     }
-    // Never report an empty turn as success: fall back to the raw response.
-    if (!parts.length) parts.push({ text: typeof result.response === 'string' ? result.response : '' });
+    if (!parts.length && typeof result.response === 'string' && result.response.trim()) {
+      parts.push({ text: result.response });
+    }
   } else if (structured && result.structured_output !== undefined) {
     parts.push({ text: JSON.stringify(result.structured_output) });
-  } else {
-    parts.push({ text: String(result.response ?? '') });
+  } else if (typeof result.response === 'string' && result.response.trim()) {
+    parts.push({ text: result.response });
   }
+  if (!parts.length) throw bad('Antigravity CLI returned an empty response', 502);
   const promptTokens = Number(result.usage?.input_tokens ?? 0);
   const outputTokens = Number(result.usage?.output_tokens ?? 0);
   return {
