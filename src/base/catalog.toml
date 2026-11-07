@@ -16,6 +16,11 @@ match = [
   "*-small*", "*-tiny*", "*-nano-*",
 ]
 
+# Specific economical variants must precede frontier family wildcards.
+[[entry]]
+grade = "B"
+match = ["o4-mini*", "gpt-5.2-mini*", "gpt-5.2-nano*"]
+
 # ── A+ · frontier ──────────────────────────────────────────────────────
 [[entry]]
 grade = "A+"
