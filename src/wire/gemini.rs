@@ -1696,7 +1696,10 @@ mod tests {
             }],
         });
         let buffered = gemini_to_openai(&response, "gemini").unwrap();
-        assert_eq!(buffered["choices"][0]["message"]["content"], "Reading file.");
+        assert_eq!(
+            buffered["choices"][0]["message"]["content"],
+            "Reading file."
+        );
         assert_eq!(buffered["choices"][0]["finish_reason"], "tool_calls");
         assert_eq!(
             buffered["choices"][0]["message"]["tool_calls"][0]["function"]["name"],

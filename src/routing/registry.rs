@@ -239,7 +239,34 @@ impl Registry {
             })
     }
 
-    fn visible(&self, model: &Model, profile: &str) -> bool {
+    /// A collision-free client alias; canonical IDs remain accepted.
+    pub fn model_alias(&self, model: &Model) -> Option<String> {
+        let alias = model.id.replace('/', "-");
+        if self.ladder.parse_request(&alias).is_some()
+            || self
+                .groups
+                .iter()
+                .any(|g| alias == g.id || alias.starts_with(&format!("{}-", g.id)))
+            || self
+                .models
+                .iter()
+                .any(|m| m.id != model.id && (m.id == alias || m.id.replace('/', "-") == alias))
+        {
+            None
+        } else {
+            Some(alias)
+        }
+    }
+
+    pub fn direct_model(&self, selector: &str) -> Option<&Model> {
+        self.models.iter().find(|m| m.id == selector).or_else(|| {
+            self.models
+                .iter()
+                .find(|m| self.model_alias(m).as_deref() == Some(selector))
+        })
+    }
+
+    pub(crate) fn visible(&self, model: &Model, profile: &str) -> bool {
         // model-side exclusivity: empty = all profiles
         if !model.profiles.is_empty() && !model.profiles.iter().any(|p| p == profile) {
             return false;

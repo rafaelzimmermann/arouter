@@ -884,7 +884,7 @@ async fn handle_chat(
     // `codex/gpt-6-astra`; it still goes through the same pool, profile,
     // quota, health, context, and budget gates as grade/group routing.
     let direct_model = if group_sel.is_none() {
-        reg.models.iter().find(|m| m.id == raw_model)
+        reg.direct_model(&raw_model)
     } else {
         None
     };
@@ -1175,7 +1175,7 @@ async fn list_models(st: AppState, profile: &str, pool: &str, headers: &HeaderMa
     // models visible to the profile (`arouter-subscription-A+`, …). The
     // bare group ids and legacy grade tokens stay accepted on requests
     // but are no longer advertised.
-    let data: Vec<serde_json::Value> = reg
+    let mut data: Vec<serde_json::Value> = reg
         .groups
         .iter()
         .flat_map(|g| {
@@ -1191,6 +1191,18 @@ async fn list_models(st: AppState, profile: &str, pool: &str, headers: &HeaderMa
                 })
         })
         .collect();
+    for model in &reg.models {
+        if model.pools.iter().any(|p| p.as_str() == pool) && reg.visible(model, profile) {
+            let id = reg.model_alias(model).unwrap_or_else(|| model.id.clone());
+            if !data.iter().any(|entry| entry["id"] == id) {
+                data.push(serde_json::json!({
+                    "id": id,
+                    "object": "model",
+                    "owned_by": "arouter",
+                }));
+            }
+        }
+    }
     Json(serde_json::json!({ "object": "list", "data": data })).into_response()
 }
 

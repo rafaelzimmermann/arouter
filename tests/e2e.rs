@@ -3976,3 +3976,79 @@ async fn custom_group_fallback_uses_grade_tokens_not_global_rank_positions() {
     .await;
     assert_eq!(strict.status(), StatusCode::TOO_MANY_REQUESTS);
 }
+
+#[tokio::test]
+async fn specific_model_aliases_are_listed_and_pin_the_upstream() {
+    let (up, hits) = counting_good().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![
+        model("zai/glm-5.3", "A+", &["quota"], &up, 1.0, (0.0, 0.0)),
+        model("local/test", "B", &["local"], &up, 1.0, (0.0, 0.0)),
+    ];
+    let t = test_app(cfg);
+    let resp = web_get(&t.app, "/v1/models", HeaderMap::new()).await;
+    let body = body_string(resp).await;
+    assert!(body.contains("\"zai-glm-5.3\""), "{body}");
+    assert!(!body.contains("\"local-test\""), "{body}");
+    for selector in ["zai-glm-5.3", "zai/glm-5.3"] {
+        let resp = post_chat(
+            &t.app,
+            "/v1/chat/completions",
+            selector,
+            false,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(hstr(&resp, "x-arouter-upstream"), "zai/glm-5.3");
+    }
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "local-test",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_ne!(resp.status(), StatusCode::OK);
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    let resp = web_get(&t.app, "/local/v1/models", HeaderMap::new()).await;
+    assert!(body_string(resp).await.contains("\"local-test\""));
+}
+
+#[tokio::test]
+async fn ambiguous_model_aliases_require_canonical_ids() {
+    let up = good_json().await;
+    let mut cfg = Config::default();
+    cfg.models = vec![
+        model("a/b-c", "A", &["quota"], &up, 1.0, (0.0, 0.0)),
+        model("a-b/c", "A", &["quota"], &up, 1.0, (0.0, 0.0)),
+    ];
+    let t = test_app(cfg);
+    let resp = web_get(&t.app, "/v1/models", HeaderMap::new()).await;
+    let body = body_string(resp).await;
+    assert!(body.contains("\"a/b-c\""));
+    assert!(body.contains("\"a-b/c\""));
+    assert!(!body.contains("\"a-b-c\""));
+    let resp = post_chat(
+        &t.app,
+        "/v1/chat/completions",
+        "a-b-c",
+        false,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    for selector in ["a/b-c", "a-b/c"] {
+        let resp = post_chat(
+            &t.app,
+            "/v1/chat/completions",
+            selector,
+            false,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(hstr(&resp, "x-arouter-upstream"), selector);
+    }
+}
