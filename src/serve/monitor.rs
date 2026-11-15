@@ -317,10 +317,7 @@ pub fn row_matches(m: &ModelRow, pool: Option<&str>, grade: Option<&str>, search
             return false;
         }
     }
-    if !search.is_empty() && !m.id.to_lowercase().contains(&search.to_lowercase()) {
-        return false;
-    }
-    true
+    search.is_empty() || m.id.to_lowercase().contains(&search.to_lowercase())
 }
 
 /// A flattened, display-ready model row (built per poll).
